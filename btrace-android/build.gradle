@@ -46,3 +46,116 @@ ext {
 task clean(type: Delete) {
     delete rootProject.buildDir
 }
+
+tasks.register('verifyKnowledgeBase') {
+    group = 'verification'
+    description = '校验 btrace Android 中文知识库的结构、索引和相对链接。'
+
+    doLast {
+        File knowledgeBaseIndex = file('docs/README.md')
+        List<String> requiredDocNames = [
+                'README.md',
+                'getting-started.md',
+                'architecture.md',
+                'app-sdk.md',
+                'native-runtime.md',
+                'cli-processor.md',
+                'protocol-and-data-formats.md',
+                'configuration-reference.md',
+                'source-reference.md',
+                'development-and-release.md',
+                'troubleshooting.md',
+                'glossary.md'
+        ]
+        List<String> requiredSections = [
+                '适用对象',
+                '## 正文',
+                '## 相关源码',
+                '## 验证方式',
+                '## 相关文档'
+        ]
+        List<String> errors = []
+
+        File projectReadme = file('README.md')
+        if (!projectReadme.isFile()) {
+            errors.add('缺少子项目入口 README.md')
+        }
+        if (!knowledgeBaseIndex.isFile()) {
+            errors.add('缺少知识库入口 docs/README.md')
+        }
+
+        List<File> markdownFiles = []
+        requiredDocNames.each { String name ->
+            File markdownFile = file("docs/${name}")
+            if (!markdownFile.isFile()) {
+                errors.add("缺少必需文档 docs/${name}")
+            }
+        }
+
+        List<File> allKnowledgeDocs = fileTree('docs') {
+            include '**/*.md'
+        }.files.sort { it.path }
+        markdownFiles.addAll(allKnowledgeDocs)
+        allKnowledgeDocs.each { File markdownFile ->
+            String content = markdownFile.getText('UTF-8')
+            requiredSections.each { String section ->
+                if (!content.contains(section)) {
+                    String relativeSource = rootDir.toPath().relativize(markdownFile.toPath()).toString()
+                    errors.add("${relativeSource} 缺少章节或声明：${section}")
+                }
+            }
+        }
+
+        if (projectReadme.isFile()) {
+            markdownFiles.add(projectReadme)
+            String content = projectReadme.getText('UTF-8')
+            if (!content.contains('(docs/README.md)')) {
+                errors.add('README.md 未链接知识库入口 docs/README.md')
+            }
+        }
+
+        if (knowledgeBaseIndex.isFile()) {
+            String indexContent = knowledgeBaseIndex.getText('UTF-8')
+            allKnowledgeDocs.findAll { it != knowledgeBaseIndex }.each { File markdownFile ->
+                String relativeName = knowledgeBaseIndex.parentFile.toPath()
+                        .relativize(markdownFile.toPath()).toString().replace('\\', '/')
+                if (!indexContent.contains("(${relativeName})")) {
+                    errors.add("docs/README.md 未索引 ${relativeName}")
+                }
+            }
+        }
+
+        def markdownLinkPattern = ~/(?<!!)\[[^\]]*\]\(([^)]+)\)/
+        markdownFiles.unique().each { File markdownFile ->
+            String content = markdownFile.getText('UTF-8')
+            def matcher = markdownLinkPattern.matcher(content)
+            while (matcher.find()) {
+                String rawTarget = matcher.group(1).trim()
+                if (rawTarget.startsWith('<') && rawTarget.endsWith('>')) {
+                    rawTarget = rawTarget.substring(1, rawTarget.length() - 1)
+                }
+                String target = rawTarget.split('\\s+"', 2)[0]
+                if (target.startsWith('#') ||
+                        target.startsWith('http://') ||
+                        target.startsWith('https://') ||
+                        target.startsWith('mailto:')) {
+                    continue
+                }
+                target = target.split('#', 2)[0].split('\\?', 2)[0]
+                if (target.isEmpty()) {
+                    continue
+                }
+                File resolved = new File(markdownFile.parentFile, target).canonicalFile
+                if (!resolved.exists()) {
+                    String relativeSource = rootDir.toPath().relativize(markdownFile.toPath()).toString()
+                    errors.add("${relativeSource} 包含无效相对链接：${rawTarget}")
+                }
+            }
+        }
+
+        if (!errors.isEmpty()) {
+            throw new GradleException('知识库校验失败：\n - ' + errors.join('\n - '))
+        }
+        logger.lifecycle("知识库校验通过：${markdownFiles.unique().size()} 个 Markdown 文件")
+    }
+}
