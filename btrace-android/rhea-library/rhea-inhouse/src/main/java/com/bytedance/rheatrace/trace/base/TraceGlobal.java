@@ -50,5 +50,14 @@ public class TraceGlobal {
         }
     }
 
+    /** 切换在线采集开关；仅影响在线模式，调试模式保持原有行为。 */
+    public static void setOnlineEnabled(boolean enabled) {
+        if (success) {
+            nativeSetOnlineEnabled(enabled);
+        }
+    }
+
     private static native void nativeCapture(boolean force);
+
+    private static native void nativeSetOnlineEnabled(boolean enabled);
 }

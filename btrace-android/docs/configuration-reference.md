@@ -70,6 +70,10 @@ CLI 在采集前设置，shutdown hook 中清零：
 
 不要组合 `-r` 与 `-w`。当前源码也没有经过专用解析的 `-mainThreadOnly`；公开 README 中该参数属于待核实项。
 
+### 在线配置
+
+`OnlineConfig` 的默认缓冲约 5MiB、最小间隔 10ms、前台限制开启、导出冷却 60s、磁盘配额 20MiB、产物 TTL 3 天。缓冲允许 1--16MiB，间隔不得低于 5ms；在线模式固定只采集主线程同步 Hook。字段和降级策略见[在线卡顿采集](online-jank.md)。
+
 ## 相关源码
 
 - [gradle.properties](../gradle.properties)

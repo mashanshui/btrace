@@ -36,6 +36,7 @@
 namespace rheatrace {
 
 SamplingCollector* SamplingCollector::sInstance = nullptr;
+std::atomic<bool> SamplingCollector::sOnlineEnabled{false};
 
 static uint64_t getStackRecordTime(SamplingRecord& r) {
     return r.mEndNanoTime == 0 ? r.mNanoTime : r.mEndNanoTime;
@@ -67,9 +68,19 @@ bool SamplingCollector::request(SamplingType type, void* self, bool force, bool 
     if (collector == nullptr || collector->isPaused()) {
         return false;
     }
+    const bool mainThread = is_main_thread();
+    if (collector->config.onlineMode) {
+        if (!sOnlineEnabled.load(std::memory_order_acquire)
+                || (collector->config.mainThreadOnly && !mainThread)) {
+            return false;
+        }
+    }
     auto currentNano = current_clock_id_time_nanos(collector->config.clockId);
-    if (force || currentNano - lastJavaNano > (is_main_thread() ? collector->config.mainThreadJavaIntervalNs
-                                                                : collector->config.otherThreadJavaIntervalNs)) {
+    const uint64_t intervalNs = mainThread ? collector->config.mainThreadJavaIntervalNs
+                                           : collector->config.otherThreadJavaIntervalNs;
+    // 在线模式始终遵守硬间隔，避免调用方传入 force 造成线上抖动。
+    if ((collector->config.onlineMode ? false : force)
+            || currentNano - lastJavaNano > intervalNs) {
         lastJavaNano = currentNano;
         SamplingRecord r;
         if (StackVisitor::visitOnce(r.mStack, self, collector->config.stackWalkKind)) {
@@ -113,6 +124,9 @@ bool SamplingCollector::request(SamplingType type, void* self, bool force, bool 
 
 void SamplingCollector::start(JNIEnv* env, jlongArray asyncConfigs) {
     paused = false;
+    if (config.onlineMode) {
+        sOnlineEnabled.store(true, std::memory_order_release);
+    }
     StackVisitor::init();
     trace::init(env, asyncConfigs, config.enableObjectAllocationStub, config.enableWakeup,
                 config.shadowPauseMode);

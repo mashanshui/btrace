@@ -9,9 +9,10 @@
 SDK 使用者推荐按以下顺序阅读：
 
 1. [快速开始](getting-started.md)
-2. [配置参考](configuration-reference.md)
-3. [排障指南](troubleshooting.md)
-4. [术语表](glossary.md)
+2. [在线卡顿采集](online-jank.md)
+3. [配置参考](configuration-reference.md)
+4. [排障指南](troubleshooting.md)
+5. [术语表](glossary.md)
 
 项目贡献者推荐按以下顺序阅读：
 
@@ -28,6 +29,7 @@ SDK 使用者推荐按以下顺序阅读：
 | 文档 | 主要回答的问题 | 状态 |
 | --- | --- | --- |
 | [快速开始](getting-started.md) | 如何构建、接入、采集并打开结果？ | 已按当前源码核对 |
+| [在线卡顿采集](online-jank.md) | 如何常驻采样、导出环形缓冲并交给服务端解析？ | 首版实现与边界 |
 | [总体架构](architecture.md) | 四个模块如何协作？控制流和数据流如何经过设备与 PC？ | 已按当前源码核对 |
 | [App 端 SDK](app-sdk.md) | 公共 API、生命周期和 Trace Ability 如何工作？ | 已按当前源码核对 |
 | [Native 实现](native-runtime.md) | JNI、Hook、抓栈、RingBuffer 和 dump 如何工作？ | 已按当前源码核对 |

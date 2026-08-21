@@ -27,6 +27,7 @@ Windows 优先使用 Gradle Wrapper：
 | Sampling 配置 | Java deflate 与 C++ 解析顺序；默认值与系统属性 |
 | Native Hook | arm64 真机；至少记录 API/ABI；命中、失败、恢复和压力场景 |
 | RingBuffer/格式 | 小 buffer 覆盖；旧/新样本解码；Perfetto UI 打开 |
+| 在线卡顿 API/ZIP | 真实/noop API 一致；前后台、冷却、配额、重启待上传；`analyze-jank` JSON/PB |
 | CLI 参数 | Windows 与 macOS 相关分支；过滤/转发数组；非法输入 |
 | ProGuard retrace | 未混淆、R8 mapping、同名重载和 synthesized 方法 |
 | Perfetto proto | runtime/生成版本；perfetto/simple 输出；Perfetto UI |
@@ -70,6 +71,7 @@ Windows 优先使用 Gradle Wrapper：
 | 系统属性 | App 端 SDK、配置参考、排障指南 |
 | Native Hook/采样字段 | Native 实现、协议与数据格式、源码参考、术语表 |
 | 文件格式/proto | CLI 处理器、协议与数据格式、开发与发布 |
+| 在线配置/manifest/报告 | 在线卡顿、协议与数据格式、配置参考、排障指南、源码参考 |
 | 支持版本/ABI | 快速开始、配置参考、排障指南、知识库首页待核实项 |
 
 ### 文档写作约定

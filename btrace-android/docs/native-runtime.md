@@ -36,6 +36,8 @@ flowchart TD
 
 `SamplingCollector` 是当前唯一 Collector。首次创建时根据 `SamplingConfig.capacity` 分配 `PerfBuffer<SamplingRecord>`。每次 request 会先检查暂停状态和最小间隔，再同步访问当前线程栈；只有保存深度等于实际深度时才写入。
 
+在线模式在同一入口增加主线程过滤、Native 硬间隔和在线开关检查；不满足条件时直接返回，不执行抓栈。在线配置关闭对象分配、rusage 和 wakeup 附加统计，仍复用双 RingBuffer 的覆盖和备份切换逻辑。
+
 `SamplingRecord` 保存事件类型、线程 ID、消息 ID、开始/结束 wall time 与 CPU time、对象分配数量/字节、major fault、主动/被动上下文切换和堆栈。时间字段采用配置的 clock；默认配置为 boottime。
 
 RingBuffer 使用递增 ticket 标识记录位置。容量用尽后槽位被覆盖；dump 根据 start/end token 导出仍可用区间。备份 buffer 用于 dump 等场景下继续接收写入，具体切换逻辑由 `PerfBuffer` 管理。
@@ -44,7 +46,7 @@ RingBuffer 使用递增 ticket 标识记录位置。容量用尽后槽位被覆�
 
 - `StackVisitor` 负责访问 ART 线程栈并填充 `Stack`。
 - `SamplingTrace` 提供不同事件的采集入口，最终统一调用 `SamplingCollector::request`。
-- `force` 绕过 `lastJavaNano` 间隔判断；正常采样按主线程或其他线程间隔限流。
+- 调试模式的 `force` 绕过 `lastJavaNano` 间隔判断；在线模式始终遵守硬间隔，即使调用方传入 `force` 也不会突破线上限流。
 - `captureAtEnd` 事件同时记录开始/结束时间和 CPU time；瞬时事件只记录当前时间。
 - `messageIndex` 与 `lastJavaNano` 是 thread-local，消息边界和采样限流互不跨线程。
 

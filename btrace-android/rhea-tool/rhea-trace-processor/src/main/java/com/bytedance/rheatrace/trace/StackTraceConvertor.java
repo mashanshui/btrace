@@ -32,10 +32,15 @@ public class StackTraceConvertor {
     private static final int SINGLE_SAMPLING_DURATION = 10;
 
     public static Trace convert(int pid, List<StackList> items, Map<Integer, String> threadNames) {
+        return convert(pid, Arguments.get().appName, items, threadNames);
+    }
+
+    public static Trace convert(int pid, String appName, List<StackList> items,
+                                Map<Integer, String> threadNames) {
         items.sort(Comparator.comparingLong(o -> o.nanoTime));
         Map<Integer, List<StackList>> threadItemsMap = groupByThreadId(items);
         Trace trace = new Trace();
-        trace.setProcess(pid, Arguments.get().appName);
+        trace.setProcess(pid, appName == null ? "unknown" : appName);
         for (Map.Entry<Integer, List<StackList>> entry : threadItemsMap.entrySet()) {
             Integer tid = entry.getKey();
             String threadName = threadNames.get(tid);

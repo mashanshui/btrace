@@ -48,3 +48,11 @@ Java_com_bytedance_rheatrace_trace_base_TraceGlobal_nativeCapture(JNIEnv* env, j
         collector->request(rheatrace::SamplingType::kCustom, nullptr, force);
     }
 }
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_bytedance_rheatrace_trace_base_TraceGlobal_nativeSetOnlineEnabled(JNIEnv* env,
+                                                                            jclass clazz,
+                                                                            jboolean enabled) {
+    rheatrace::SamplingCollector::setOnlineEnabled(enabled == JNI_TRUE);
+}

@@ -42,11 +42,24 @@ public abstract class TraceAbility<T extends TraceConfig> {
     }
 
     public synchronized long stop() {
+        if (nativeCollectorPtr == 0 || activeCount == 0) {
+            return 0;
+        }
         long result = nativeMark(nativeCollectorPtr);
         if (--activeCount == 0) {
-            nativeStop(nativeCollectorPtr);
+            if (nativeCollectorPtr != 0) {
+                nativeStop(nativeCollectorPtr);
+            }
         }
         return result;
+    }
+
+    /** 返回当前采集器游标，用于在线事件导出时截取环形缓冲区。 */
+    public synchronized long mark() {
+        if (nativeCollectorPtr == 0 || activeCount == 0) {
+            return 0;
+        }
+        return nativeMark(nativeCollectorPtr);
     }
 
     public int dumpTokenRange(long start, long end, String path, String extra) {

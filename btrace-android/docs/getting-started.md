@@ -53,6 +53,8 @@ RheaTrace3.captureStackTrace(false)
 
 传入 `true` 会忽略最小采样间隔并强制尝试抓栈；调用成功仍依赖 Native Collector 已启动且未暂停。
 
+线上卡顿采集不要启动调试 HTTP 服务，改用 `RheaTrace3.initOnline` 和异步 `dumpJankTrace`；完整接入代码、ZIP 上传和 `analyze-jank` 命令见[在线卡顿采集](online-jank.md)。
+
 ### 4. 构建示例与 CLI
 
 ```powershell

@@ -13,6 +13,7 @@
 | [`RheaTrace3`](../rhea-library/rhea-inhouse/src/main/java/com/bytedance/rheatrace/RheaTrace3.java) | 唯一公开 API，初始化和手动抓栈 | Application → `TraceManager`/`TraceGlobal`；签名需与 noop 同步 |
 | [`RheaTrace3` noop](../rhea-library/rhea-inhouse-noop/src/main/java/com/bytedance/rheatrace/RheaTrace3.java) | 公共 API 的空实现 | 业务调用 → 无副作用；公共签名兼容点 |
 | [`TraceManager`](../rhea-library/rhea-inhouse/src/main/java/com/bytedance/rheatrace/TraceManager.java) | 管理 start/stop、token、异步 dump 和目录 | `RheaTrace3`/HTTP → Ability/HTTP 回调；新增 TraceMeta 的编排点 |
+| `RheaTrace3.OnlineConfig/JankEvent/DumpResult`（嵌套类型） | 在线配置、事件边界和异步导出结果 | 业务/JankStats → `TraceManager`；ZIP manifest 契约 |
 | [`TraceProperties`](../rhea-library/rhea-inhouse/src/main/java/com/bytedance/rheatrace/prop/TraceProperties.java) | 反射读取 Android 系统属性并回退默认值 | 配置创建器/HTTP → SystemProperties；新增端上开关入口 |
 | [`HttpServer`](../rhea-library/rhea-inhouse/src/main/java/com/bytedance/rheatrace/server/HttpServer.java) | 随机端口服务、控制 action、查询和文件下载 | CLI HTTP → TraceManager/文件；协议扩展点 |
 | [`ProcessUtils`](../rhea-library/rhea-inhouse/src/main/java/com/bytedance/rheatrace/utils/ProcessUtils.java) | 判断当前是否主进程 | `RheaTrace3` → ActivityManager |
@@ -69,6 +70,9 @@
 | [`ProguardMappingDecoder`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/trace/ProguardMappingDecoder.java) | 解析 R8/ProGuard mapping 并还原方法签名 | SamplingTraceDecoder → MappingClass/Method 内部模型 |
 | [`StackList`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/trace/StackList.java) | 按格式版本解码单条采样记录和堆栈 | SamplingTraceDecoder → MethodSymbol/CallNode |
 | [`StackTraceConvertor`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/trace/StackTraceConvertor.java) | 按线程将采样记录转换为 slice/counter | SamplingTraceDecoder → Trace |
+| [`JankArtifact`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/jank/JankArtifact.java) | 安全解包并校验线上 ZIP manifest/文件 | `JankMain` → 临时目录/采样文件 |
+| [`JankAnalyzer`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/jank/JankAnalyzer.java) | 统计精确 Hook 耗时、点采样和质量告警 | JankArtifact → SamplingTraceDecoder/JSON/Trace |
+| [`JankMain`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/jank/JankMain.java) | `analyze-jank` 离线命令参数和输出 | Main → JankAnalyzer/JSON/Perfetto PB |
 | [`CallNode`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/trace/CallNode.java) | 表示转换过程中的调用节点/嵌套关系 | StackTraceConvertor 内部 |
 | [`MethodSymbol`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/trace/MethodSymbol.java) | 保存方法指针、偏移和符号文本 | MappingDecoder/StackList |
 | [`ReservedMethodManager`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/trace/ReservedMethodManager.java) | 管理特殊保留方法/事件名称映射 | StackList/Convertor |
@@ -81,7 +85,7 @@
 | Native 构建 | [`CMakeLists.txt`](../rhea-library/rhea-inhouse/src/main/cpp/CMakeLists.txt) | 汇总编译单元、C++17、ShadowHook 和系统库 |
 | 加载入口 | [`RheaOnLoad.cpp`](../rhea-library/rhea-inhouse/src/main/cpp/RheaOnLoad.cpp) | JNI_OnLoad、VM 保存和 Native 注册 |
 | 全局上下文 | [`RheaContext.cpp/.h`](../rhea-library/rhea-inhouse/src/main/cpp/RheaContext.cpp) | 保存跨组件上下文和初始化状态 |
-| 全局 JNI | [`TraceGlobalJni.cpp`](../rhea-library/rhea-inhouse/src/main/cpp/TraceGlobalJni.cpp) | TraceGlobal init/capture Native 实现 |
+| 全局 JNI | [`TraceGlobalJni.cpp`](../rhea-library/rhea-inhouse/src/main/cpp/TraceGlobalJni.cpp) | TraceGlobal init/capture/在线开关 Native 实现 |
 | Ability JNI | [`TraceAbilityJni.cpp`](../rhea-library/rhea-inhouse/src/main/cpp/TraceAbilityJni.cpp) | Collector create/start/update/mark/dump/stop 分发 |
 | Collector 接口 | [`PerfCollector.h`](../rhea-library/rhea-inhouse/src/main/cpp/base/PerfCollector.h) | Native Collector 生命周期接口 |
 | Collector 模板 | [`PerfCollectorBaseImpl.h`](../rhea-library/rhea-inhouse/src/main/cpp/base/PerfCollectorBaseImpl.h) | 文件名、dump/dumpPart 和 Dumper 创建模板 |

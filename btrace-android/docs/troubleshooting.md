@@ -160,6 +160,24 @@ adb shell setprop debug.rhea3.sampleInterval 0
 
 `persist.traced.enable` 当前 teardown 不还原。是否恢复应依据设备原始状态和团队调试规范决定，不要机械设置未知值。
 
+### 在线卡顿导出
+
+**`initOnline` 返回模式冲突或 `DISABLED`**
+
+- 确认同一进程没有先调用调试 `init` 并启动 HTTP 采集；两种模式不可并行。
+- 检查 `enable_btrace` 是否误切到了 noop 依赖，以及设备是否为 Android 8.0+ arm64。
+
+**卡顿事件被拒绝**
+
+- `BACKGROUND` 表示前台限制生效；`COOLDOWN` 和 `BUSY` 表示保护阈值生效，不要在检测回调中重试风暴。
+- `ACCEPTED` 后等待 `DumpCallback`；回调失败消息和 logcat 中的 native dump 错误一起保留。
+
+**ZIP 没有有效耗时**
+
+- 事件时间必须使用 `elapsedRealtimeNanos` 同一时钟域，且结束时间不早于开始时间。
+- `pointSampleCount` 不能乘采样间隔伪造耗时；若没有 duration Hook，报告会明确提示证据不足。
+- 检查 RingBuffer 容量是否覆盖事件前窗口；容量不足会覆盖旧样本。
+
 ## 相关源码
 
 - [Main](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/Main.java)
@@ -179,3 +197,4 @@ adb shell setprop debug.rhea3.sampleInterval 0
 - [配置参考](configuration-reference.md)
 - [CLI 处理器](cli-processor.md)
 - [协议与数据格式](protocol-and-data-formats.md)
+- [在线卡顿采集](online-jank.md)

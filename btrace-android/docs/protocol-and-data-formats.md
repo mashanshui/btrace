@@ -46,6 +46,8 @@ CLI 使用固定的 `/storage/emulated/0/Android/data/<package>/files/rhea-port`
 
 后续为变长 `SamplingRecord`。每条记录依次编码事件类型、16 位 tid、消息 ID、六个 64 位时间/分配字段、三个 32 位 rusage 字段和栈信息。具体栈编码和不同 version 的分支由 `StackList.decode` 定义。
 
+在线导出在这些既有文件外增加 ZIP 封装：`manifest.json`、`sampling.bin`、`sampling-mapping.bin`。manifest 的 `schemaVersion=1`、`samplingFormatVersion=5`、事件单调时钟范围、mappingId、文件大小和 SHA-256 供服务端校验；详见[在线卡顿采集](online-jank.md)。
+
 解码器当前读取但不验证 magic 和 type。格式维护者仍必须保留正确值，并在新增版本时实现显式校验/兼容，不能依赖“旧解码器碰巧能读”。
 
 ### sampling-mapping 文件

@@ -41,6 +41,8 @@ private:
     bool enableWakeup;
     bool enabledThreadNames;
     bool shadowPauseMode;
+    bool onlineMode = false;
+    bool mainThreadOnly = false;
 
     friend class SamplingCollector;
 };

@@ -84,9 +84,39 @@ flowchart TD
     Merger --> PB[最终 Perfetto protobuf]
 ```
 
+### 在线卡顿链路
+
+```mermaid
+sequenceDiagram
+    participant J as JankStats/业务检测器
+    participant R as RheaTrace3
+    participant M as TraceManager
+    participant N as Native RingBuffer
+    participant H as Collector HandlerThread
+    participant U as 业务上传器
+    participant P as 服务端处理器
+
+    R->>M: initOnline(config)
+    M->>N: 主线程 Hook 常驻采集
+    N->>N: 满容量后覆盖旧 ticket
+    J->>R: JankEvent(startNs,endNs)
+    R->>M: dumpJankTrace(event)
+    M->>H: 入队并 mark token
+    H->>N: dumpTokenRange + extra
+    N-->>H: sampling / sampling-mapping
+    H->>H: 写 manifest、SHA-256、ZIP、配额清理
+    H-->>R: DumpCallback(SUCCESS/FAILED)
+    R-->>U: artifact 文件
+    U->>P: 上传 ZIP + 外部 ProGuard mapping
+    P->>P: analyze-jank / 生成 JSON 与可选 Perfetto PB
+```
+
+在线链路不经过调试 HTTP 或 ADB；SDK 只负责本地环形缓存和异步产物，网络重试、鉴权、存储及聚合由业务平台负责。
+
 ### 生命周期与边界
 
 - `RheaTrace3.init` 仅主进程生效；多进程 App 的其他进程不会启动服务或采集。
+- `RheaTrace3.initOnline` 同样只在主进程生效；它不启动 HTTP，前台/远程开关决定 Native 是否写入，导出在独立 HandlerThread 上完成。
 - `TraceManager` 当前固定请求 `TraceMeta.Sampling`，抽象虽然支持扩展能力，但没有启用第二种 TraceMeta。
 - start/stop 返回的 token 是 RingBuffer ticket 范围；dump 仅导出该区间，旧数据可能因容量不足被覆盖。
 - App 数据和系统 Trace 独立开始/停止，CLI 最终以 protobuf 方式合并，因此异常退出可能只留下工作目录中的部分产物。

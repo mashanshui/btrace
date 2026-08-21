@@ -15,6 +15,10 @@
 
 noop 制品保留相同类和方法签名，方法体为空。业务代码只依赖 `RheaTrace3`，不应直接使用 `TraceManager`、`TraceProperties` 或 `trace.*` 包。
 
+### 在线卡顿 API
+
+线上模式使用 `RheaTrace3.initOnline(Context, OnlineConfig)` 常驻采集，由业务/JankStats 构造 `JankEvent` 后调用 `dumpJankTrace`。导出任务在 SDK 采集线程异步执行，回调只返回 ZIP 文件，不承担上传；模式与现有调试 HTTP 采集互斥。完整参数、产物和服务端命令见[在线卡顿采集](online-jank.md)。
+
 ### 初始化和主进程判断
 
 `ProcessUtils.isMainProcess` 通过当前 PID、`ActivityManager` 和包名判断主进程。判断通过后，`TraceManager.init`：
@@ -54,7 +58,7 @@ stateDiagram-v2
 
 `SamplingConfigCreator` 当前设置：boottime 时钟、相同的主/其他线程采样间隔、启用 rusage、对象分配统计、wakeup、线程名和 shadow pause。容量及间隔来自系统属性，缺失或非法时回退到 `SamplingConfig` 常量。
 
-配置通过 `SamplingConfig.deflate()` 压缩为固定顺序的 `long[]` 传入 JNI。任何字段增删或顺序变化都属于 Java/Native 内部接口变更，必须同步修改 Native `SamplingConfig` 解析。
+配置通过 `SamplingConfig.deflate()` 压缩为固定顺序的 `long[]` 传入 JNI。调试模式沿用前 10 个字段，在线模式追加 `onlineMode` 和 `mainThreadOnly` 两个字段。任何字段增删或顺序变化都属于 Java/Native 内部接口变更，必须同步修改 Native `SamplingConfig` 解析。
 
 ### 线程与错误行为
 

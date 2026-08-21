@@ -34,6 +34,30 @@ import java.util.Map;
 
 public class SamplingTraceDecoder {
 
+    public static final class DecodedSampling {
+        private final Trace trace;
+        private final List<StackList> items;
+        private final JSONObject extra;
+
+        private DecodedSampling(Trace trace, List<StackList> items, JSONObject extra) {
+            this.trace = trace;
+            this.items = items;
+            this.extra = extra;
+        }
+
+        public Trace getTrace() {
+            return trace;
+        }
+
+        public List<StackList> getItems() {
+            return items;
+        }
+
+        public JSONObject getExtra() {
+            return extra;
+        }
+    }
+
     private static int pid = 0;
 
     public static int getPid() {
@@ -41,25 +65,34 @@ public class SamplingTraceDecoder {
     }
 
     public static Trace decode() throws IOException {
-        SamplingMappingDecoder mappingDecoder = decodeMapping(Workspace.samplingMapping());
-        if (Arguments.get().mappingPath != null) {
-            ProguardMappingDecoder proguardMappingDecoder = new ProguardMappingDecoder();
+        File mappingPath = Arguments.get().mappingPath == null
+                ? null : new File(Arguments.get().mappingPath);
+        DecodedSampling decoded = decodeDetailed(Workspace.samplingTrace(),
+                Workspace.samplingMapping(), Arguments.get().appName, mappingPath);
+        if (decoded.getItems().isEmpty() || !decoded.getExtra().has("processId")) {
+            return null;
+        }
+        return decoded.getTrace();
+    }
+
+    /** 解码在线 ZIP 解包后的采样文件，并返回原始记录供 JSON 分析使用。 */
+    public static DecodedSampling decodeDetailed(File sampling, File mapping,
+                                                 String appName, File proguardMapping)
+            throws IOException {
+        SamplingMappingDecoder mappingDecoder = decodeMapping(mapping);
+        if (proguardMapping != null) {
+            ProguardMappingDecoder proguardMappingDecoder =
+                    new ProguardMappingDecoder(proguardMapping.getAbsolutePath());
             proguardMappingDecoder.decode();
             mappingDecoder.retrace(proguardMappingDecoder);
         }
         List<StackList> samplingTrace = new ArrayList<>();
-        JSONObject extra = decodeSampling(Workspace.samplingTrace(), mappingDecoder.symbolMapping, samplingTrace);
-        if (samplingTrace.isEmpty()) {
-            Log.red("sampling record empty");
-            return null;
-        }
-        if (!extra.has("processId")) {
-            Log.red("missing pid value from extra");
-            return null;
-        }
-        pid = extra.getInt("processId");
-
-        return StackTraceConvertor.convert(pid, samplingTrace, mappingDecoder.threadNames);
+        JSONObject extra = decodeSampling(sampling, mappingDecoder.symbolMapping, samplingTrace);
+        int actualPid = extra.optInt("processId", 0);
+        pid = actualPid;
+        Trace trace = samplingTrace.isEmpty() ? null
+                : StackTraceConvertor.convert(actualPid, appName, samplingTrace, mappingDecoder.threadNames);
+        return new DecodedSampling(trace, samplingTrace, extra);
     }
 
     private static JSONObject decodeSampling(File sampling, Map<Long, MethodSymbol> mapping, List<StackList> items) throws IOException {

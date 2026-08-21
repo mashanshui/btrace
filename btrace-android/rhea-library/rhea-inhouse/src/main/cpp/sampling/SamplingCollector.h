@@ -22,6 +22,7 @@
 #include "StackVisitor.h"
 #include "../utils/time.h"
 #include <unistd.h>
+#include <atomic>
 
 namespace rheatrace {
 
@@ -35,6 +36,7 @@ public:
     static SamplingCollector* create(JNIEnv* env, jlongArray configs);
 
     static void destroy() {
+        sOnlineEnabled.store(false, std::memory_order_release);
         if (sInstance != nullptr) {
             delete sInstance;
             sInstance = nullptr;
@@ -43,6 +45,10 @@ public:
 
     static SamplingCollector* getInstance() {
         return sInstance;
+    }
+
+    static void setOnlineEnabled(bool enabled) {
+        sOnlineEnabled.store(enabled, std::memory_order_release);
     }
 
     static bool
@@ -57,6 +63,9 @@ public:
 
     void stop() override {
         paused = true;
+        if (config.onlineMode) {
+            sOnlineEnabled.store(false, std::memory_order_release);
+        }
     }
 
     int64_t write(SamplingRecord& r) {
@@ -83,6 +92,7 @@ private:
     }
 
     static SamplingCollector* sInstance;
+    static std::atomic<bool> sOnlineEnabled;
     SamplingConfig config;
     bool paused;
 };

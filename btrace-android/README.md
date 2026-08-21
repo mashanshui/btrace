@@ -7,8 +7,9 @@ btrace Android 是基于 Perfetto 的 Android 性能追踪实现。本目录同�
 ## 我想使用 btrace
 
 1. 阅读[快速开始](docs/getting-started.md)，完成依赖、初始化和第一次采集。
-2. 按[配置参考](docs/configuration-reference.md)选择 CLI 参数和系统属性。
-3. 遇到问题时查阅[排障指南](docs/troubleshooting.md)。
+2. 如果要线上采集卡顿，阅读[在线卡顿采集](docs/online-jank.md)并接入异步导出。
+3. 按[配置参考](docs/configuration-reference.md)选择 CLI 参数和系统属性。
+4. 遇到问题时查阅[排障指南](docs/troubleshooting.md)。
 
 ## 我想阅读或修改源码
 

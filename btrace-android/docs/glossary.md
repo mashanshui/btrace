@@ -25,6 +25,13 @@
 | shadow pause | dump/采集期间的暂停协调配置，具体语义由 Native 实现控制 |
 | `sampling` | App dump 的变长采样记录文件 |
 | `sampling-mapping` | 方法指针到符号、线程 ID 到线程名的配套映射文件 |
+| 在线模式 | `RheaTrace3.initOnline` 启动的常驻、事件驱动主线程采集模式，与调试 HTTP 模式互斥 |
+| JankEvent | 业务或 JankStats 提供的卡顿事件及单调时钟起止边界 |
+| 预留窗口（pre-roll） | 事件导出时希望保留的卡顿前上下文；实际范围受 RingBuffer 容量约束 |
+| 在线产物 | `<eventId>.rheajank.zip`，包含 manifest、sampling 和 sampling-mapping |
+| 精确耗时 | 由 duration Hook 成对记录裁剪/合并得到的区间耗时，不含点采样估算 |
+| 点采样 | 某个时刻观察到的栈，只用于频次/覆盖证据，不能直接当连续耗时 |
+| `analyze-jank` | 处理器离线子命令，解析在线产物并输出 JSON/可选 Perfetto PB |
 | Workspace | CLI 临时目录 `rheatrace.workspace` 及其中间文件集合 |
 | Perfetto 模式 | 同时执行系统 Perfetto 脚本并把 App packet 拼接到最终输出 |
 | simple 模式 | 当前源码中只转换 App sampling、不包含系统 Trace 的模式 |
