@@ -20,9 +20,10 @@ SDK 使用者推荐按以下顺序阅读：
 2. [App 端 SDK](app-sdk.md)
 3. [Native 实现](native-runtime.md)
 4. [CLI 处理器](cli-processor.md)
-5. [协议与数据格式](protocol-and-data-formats.md)
-6. [源码参考](source-reference.md)
-7. [开发与发布](development-and-release.md)
+5. [采样堆栈数据解析流程](data-parsing-flow.md)
+6. [协议与数据格式](protocol-and-data-formats.md)
+7. [源码参考](source-reference.md)
+8. [开发与发布](development-and-release.md)
 
 ### 文档清单
 
@@ -34,6 +35,7 @@ SDK 使用者推荐按以下顺序阅读：
 | [App 端 SDK](app-sdk.md) | 公共 API、生命周期和 Trace Ability 如何工作？ | 已按当前源码核对 |
 | [Native 实现](native-runtime.md) | JNI、Hook、抓栈、RingBuffer 和 dump 如何工作？ | 已按当前源码核对 |
 | [CLI 处理器](cli-processor.md) | 参数、ADB、系统 Trace、解码和合并如何串联？ | 已按当前源码核对 |
+| [采样堆栈数据解析流程](data-parsing-flow.md) | 原始采样文件如何解码、重建调用树并转换为 Perfetto/JSON？ | 已按当前源码核对 |
 | [协议与数据格式](protocol-and-data-formats.md) | HTTP action、采样文件和 mapping 文件如何约定？ | 已按当前源码核对 |
 | [配置参考](configuration-reference.md) | 构建开关、系统属性和 CLI 参数分别控制什么？ | 已按当前源码核对 |
 | [源码参考](source-reference.md) | 每个手写 Java 类和 Native 组件负责什么？ | 已按当前源码核对 |

@@ -69,7 +69,40 @@ java -jar rhea-trace-processor.jar analyze-jank \
   --trace scene_home_001.pb
 ```
 
-JSON 报告把耗时分为两类：`exactDurationNs` 只来自 Hook 的成对开始/结束记录，并在事件窗口内裁剪、合并重叠区间；`pointSampleCount` 只表示某个时刻观察到的栈，不能被乘以采样间隔冒充连续耗时。`warnings` 会提示空采样、只有点采样或设备端截断。`--trace` 是可选的 Perfetto protobuf 视图，不改变 JSON 的精确耗时口径。
+JSON 报告的 `schemaVersion` 为 2。`completeStack` 是主线程合并后的完整调用树，`otherThreads` 保存其他线程的树；每个方法节点包含：
+
+- `durationNs`：调用树重建后的 inclusive 墙钟耗时；
+- `selfDurationNs`：扣除子方法后的自身耗时；
+- `exactDurationNs`：duration hook 在事件窗口内裁剪、合并重叠区间后的精确耗时；
+- `estimatedDurationNs`：点采样重建出的估算耗时；
+- `durationSource`：`exact`、`estimated`、`mixed` 或 `unknown`。
+
+`preRollMs` 只用于补齐事件开始时的调用链，不计入方法耗时。`pointSampleCount` 只表示某个时刻观察到的栈，不能被乘以采样间隔冒充连续耗时；当没有 duration hook 时，报告会在 `warnings` 中提示证据不足。`--trace` 是可选的 Perfetto protobuf 视图，不改变 JSON 的精确耗时口径。
+
+示例：
+
+```json
+{
+  "schemaVersion": 2,
+  "completeStack": {
+    "tid": 15271,
+    "threadName": "main",
+    "durationNs": 21000000,
+    "methods": [
+      {
+        "name": "com.example.MainActivity.onDraw()",
+        "durationNs": 18000000,
+        "selfDurationNs": 4000000,
+        "exactDurationNs": 12000000,
+        "estimatedDurationNs": 6000000,
+        "durationSource": "mixed",
+        "children": []
+      }
+    ]
+  },
+  "otherThreads": []
+}
+```
 
 ### 性能与降级策略
 
@@ -93,7 +126,8 @@ JSON 报告把耗时分为两类：`exactDurationNs` 只来自 Hook 的成对开
 - `rhea-library/rhea-inhouse/src/main/cpp/sampling/SamplingCollector.cpp`：主线程过滤、硬间隔和写入环形缓冲。
 - `rhea-library/rhea-inhouse/src/main/cpp/base/PerfBuffer.h`：双缓冲切换、覆盖和 token 区间导出。
 - `rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/jank/JankMain.java`：`analyze-jank` 命令入口。
-- `rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/jank/JankAnalyzer.java`：精确耗时与点采样报告。
+- `rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/jank/JankAnalyzer.java`：完整调用树、方法耗时和质量告警报告。
+- `rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/trace/StackTraceConvertor.java`：采样记录到调用树的时间重建。
 
 ## 验证方式
 
@@ -103,7 +137,7 @@ JSON 报告把耗时分为两类：`exactDurationNs` 只来自 Hook 的成对开
 .\gradlew.bat :rhea-library:rhea-inhouse-noop:assembleDebug
 ```
 
-设备验证应在主进程、Android 8.0+、arm64 环境中触发一次 ≥300ms 的主线程卡顿，检查回调 ZIP、manifest 校验、重启后的待上传列表和服务端 JSON 的 `exactDurationNs`/`pointSampleCount` 分离。
+设备验证应在主进程、Android 8.0+、arm64 环境中触发一次 ≥300ms 的主线程卡顿，检查回调 ZIP、manifest 校验、重启后的待上传列表和服务端 JSON 的 `completeStack`、方法级 `durationNs`/`selfDurationNs`、`exactDurationNs`/`estimatedDurationNs` 分离。
 
 ## 相关文档
 

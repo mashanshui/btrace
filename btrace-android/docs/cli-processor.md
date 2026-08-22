@@ -84,7 +84,7 @@ CLI 捕获顶层异常并打印 `TraceError.prompt`，当前不会重新抛出�
 
 `Workspace.init` 会清空已有 `rheatrace.workspace`。不要将需要保留的手工文件放在该目录。异常退出仍可能留下工作目录或系统属性；可按[排障指南](troubleshooting.md)手工清理。
 
-除 ADB 调试入口外，处理器还提供 `analyze-jank` 离线子命令，用于读取 SDK 生成的 `.rheajank.zip`，输出精确 Hook 耗时与点采样分离的 JSON，并可选生成 Perfetto protobuf；命令和输入约定见[在线卡顿采集](online-jank.md)。
+除 ADB 调试入口外，处理器还提供 `analyze-jank` 离线子命令，用于读取 SDK 生成的 `.rheajank.zip`，输出 schema 2 的完整调用树和方法级耗时，并可选生成 Perfetto protobuf；命令和输入约定见[在线卡顿采集](online-jank.md)。
 
 ## 相关源码
 

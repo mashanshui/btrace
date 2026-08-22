@@ -29,6 +29,8 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -38,11 +40,14 @@ public class SamplingTraceDecoder {
         private final Trace trace;
         private final List<StackList> items;
         private final JSONObject extra;
+        private final Map<Integer, String> threadNames;
 
-        private DecodedSampling(Trace trace, List<StackList> items, JSONObject extra) {
+        private DecodedSampling(Trace trace, List<StackList> items, JSONObject extra,
+                                Map<Integer, String> threadNames) {
             this.trace = trace;
             this.items = items;
             this.extra = extra;
+            this.threadNames = Collections.unmodifiableMap(new HashMap<>(threadNames));
         }
 
         public Trace getTrace() {
@@ -55,6 +60,10 @@ public class SamplingTraceDecoder {
 
         public JSONObject getExtra() {
             return extra;
+        }
+
+        public Map<Integer, String> getThreadNames() {
+            return threadNames;
         }
     }
 
@@ -92,7 +101,7 @@ public class SamplingTraceDecoder {
         pid = actualPid;
         Trace trace = samplingTrace.isEmpty() ? null
                 : StackTraceConvertor.convert(actualPid, appName, samplingTrace, mappingDecoder.threadNames);
-        return new DecodedSampling(trace, samplingTrace, extra);
+        return new DecodedSampling(trace, samplingTrace, extra, mappingDecoder.threadNames);
     }
 
     private static JSONObject decodeSampling(File sampling, Map<Long, MethodSymbol> mapping, List<StackList> items) throws IOException {

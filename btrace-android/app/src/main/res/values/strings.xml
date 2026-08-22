@@ -9,4 +9,7 @@
 
     <string name="hello_first_fragment">Hello first fragment</string>
     <string name="hello_second_fragment">Hello second fragment. Arg: %1$s</string>
+    <string name="online_trace_test">测试线上卡顿采集</string>
+    <string name="online_trace_test_started">正在模拟卡顿并导出采样数据</string>
+    <string name="online_trace_test_running">上一次线上采集测试仍在进行</string>
 </resources>

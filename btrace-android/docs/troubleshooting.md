@@ -172,11 +172,14 @@ adb shell setprop debug.rhea3.sampleInterval 0
 - `BACKGROUND` 表示前台限制生效；`COOLDOWN` 和 `BUSY` 表示保护阈值生效，不要在检测回调中重试风暴。
 - `ACCEPTED` 后等待 `DumpCallback`；回调失败消息和 logcat 中的 native dump 错误一起保留。
 
-**ZIP 没有有效耗时**
+**ZIP 没有有效耗时或完整调用树**
 
 - 事件时间必须使用 `elapsedRealtimeNanos` 同一时钟域，且结束时间不早于开始时间。
 - `pointSampleCount` 不能乘采样间隔伪造耗时；若没有 duration Hook，报告会明确提示证据不足。
 - 检查 RingBuffer 容量是否覆盖事件前窗口；容量不足会覆盖旧样本。
+- 结果中的 `completeStack` 以 `processId` 对应线程为主；如果产物缺少 `processId` 或该线程没有事件窗口采样，解析器会按精确耗时、采样数量选择候选线程并在 `warnings` 中说明。
+- `preRollMs` 只补齐事件开始时的调用链，不计入 `durationNs`、`selfDurationNs` 或 `estimatedDurationNs`。
+- 方法耗时 `durationSource=estimated` 表示由点采样相邻时间重建，不能当作 Hook 级精确耗时；优先检查 `exactDurationNs` 和对应的 duration hook。
 
 ## 相关源码
 

@@ -16,14 +16,29 @@
 package rhea.sample.android.app
 
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
 import android.view.Menu
 import android.view.MenuItem
+import android.view.View
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.google.android.material.snackbar.Snackbar
+import com.bytedance.rheatrace.RheaTrace3
 import rhea.sample.android.R
 
 class MainActivity : AppCompatActivity() {
+
+    companion object {
+        private const val TAG = "RheaTrace:SampleApp"
+        private const val TEST_JANK_DURATION_MS = 80L
+        private const val TEST_DUMP_DELAY_MS = 40L
+    }
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var onlineTestRunning = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -31,9 +46,65 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         setSupportActionBar(findViewById(R.id.toolbar))
 
-        findViewById<FloatingActionButton>(R.id.fab).setOnClickListener { view ->
-            Snackbar.make(view, "Replace with your own action", Snackbar.LENGTH_LONG)
-                .setAction("Action", null).show()
+        findViewById<FloatingActionButton>(R.id.fab).apply {
+            contentDescription = getString(R.string.online_trace_test)
+            setOnClickListener { view -> runOnlineTraceTest(view) }
+        }
+    }
+
+    /** 生成一次可重复的主线程卡顿，并请求线上采样产物导出。 */
+    private fun runOnlineTraceTest(view: View) {
+        if (onlineTestRunning) {
+            Snackbar.make(view, R.string.online_trace_test_running, Snackbar.LENGTH_SHORT).show()
+            return
+        }
+        onlineTestRunning = true
+        val eventId = "manual-${SystemClock.uptimeMillis()}"
+        Snackbar.make(view, R.string.online_trace_test_started, Snackbar.LENGTH_SHORT).show()
+
+        // 先写入一个基线样本，避免初始化后立即导出时 startToken == endToken。
+        RheaTrace3.captureStackTrace(false)
+        mainHandler.post {
+            val eventStart = SystemClock.elapsedRealtimeNanos()
+            simulateMainThreadJank()
+            val eventEnd = SystemClock.elapsedRealtimeNanos()
+            // 卡顿结束后再写入一个样本，确保环形缓冲区有新记录。
+            RheaTrace3.captureStackTrace(false)
+            mainHandler.postDelayed({
+                requestOnlineDump(view, eventId, eventStart, eventEnd)
+            }, TEST_DUMP_DELAY_MS)
+        }
+    }
+
+    private fun simulateMainThreadJank() {
+        val deadline = SystemClock.uptimeMillis() + TEST_JANK_DURATION_MS
+        var accumulator = 0L
+        while (SystemClock.uptimeMillis() < deadline) {
+            accumulator = accumulator * 31L + 1L
+        }
+        if (accumulator == Long.MIN_VALUE) {
+            throw AssertionError("unreachable")
+        }
+    }
+
+    private fun requestOnlineDump(view: View, eventId: String, startNanos: Long, endNanos: Long) {
+        val event = RheaTrace3.JankEvent.builder(eventId, startNanos, endNanos)
+            .setScene("sample-main-thread")
+            .setReason("manual-fab-test")
+            .build()
+        val request = RheaTrace3.dumpJankTrace(event) { result ->
+            runOnUiThread {
+                onlineTestRunning = false
+                val artifactPath = result.getArtifact()?.absolutePath ?: ""
+                val message = "导出${result.getStatus()}：${result.getMessage()} $artifactPath"
+                Snackbar.make(view, message, Snackbar.LENGTH_LONG).show()
+                android.util.Log.i(TAG, message)
+            }
+        }
+        android.util.Log.i(TAG, "online dump request eventId=$eventId result=$request")
+        if (request != RheaTrace3.DumpRequestResult.ACCEPTED) {
+            onlineTestRunning = false
+            Snackbar.make(view, "导出请求未接受：$request", Snackbar.LENGTH_LONG).show()
         }
     }
 

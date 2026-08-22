@@ -23,14 +23,44 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 
 class App : Application() {
+    companion object {
+        private const val TAG = "RheaTrace:SampleApp"
+        private const val ONLINE_BUFFER_SIZE_BYTES = 4 * 1024 * 1024
+        private const val ONLINE_SAMPLE_INTERVAL_MS = 5L
+        private const val ONLINE_PRE_ROLL_MS = 2_000L
+
+        // 示例应用使用较短的冷却时间，便于在设备上重复验证；线上应按业务频率设置。
+        const val ONLINE_DUMP_COOLDOWN_MS = 5_000L
+        private const val ONLINE_DISK_QUOTA_BYTES = 20L * 1024L * 1024L
+        private const val ONLINE_ARTIFACT_TTL_MS = 24L * 60L * 60L * 1000L
+    }
+
     private val executor = Executors.newCachedThreadPool()
     private val latch = CountDownLatch(4)
 
     override fun attachBaseContext(base: Context?) {
         super.attachBaseContext(base)
-        RheaTrace3.init(base)
+        if (base != null) {
+            initOnlineTracing(base)
+        }
         initSdks()
         latch.await()
+    }
+
+    private fun initOnlineTracing(context: Context) {
+        val config = RheaTrace3.OnlineConfig.Builder()
+            .setBufferSizeBytes(ONLINE_BUFFER_SIZE_BYTES)
+            .setMinSampleIntervalMs(ONLINE_SAMPLE_INTERVAL_MS)
+            .setPreRollMs(ONLINE_PRE_ROLL_MS)
+            .setDumpCooldownMs(ONLINE_DUMP_COOLDOWN_MS)
+            .setDiskQuotaBytes(ONLINE_DISK_QUOTA_BYTES)
+            .setArtifactTtlMs(ONLINE_ARTIFACT_TTL_MS)
+            .setForegroundOnly(true)
+            .setEnabled(true)
+            .setMappingId("rhea-sample-app-1.0")
+            .build()
+        val result = RheaTrace3.initOnline(context, config)
+        Log.i(TAG, "online tracing init result=$result, cooldownMs=${config.getDumpCooldownMs()}")
     }
 
     private fun initSdks() {

@@ -38,7 +38,7 @@ flowchart TD
 
 在线模式在同一入口增加主线程过滤、Native 硬间隔和在线开关检查；不满足条件时直接返回，不执行抓栈。在线配置关闭对象分配、rusage 和 wakeup 附加统计，仍复用双 RingBuffer 的覆盖和备份切换逻辑。
 
-`SamplingRecord` 保存事件类型、线程 ID、消息 ID、开始/结束 wall time 与 CPU time、对象分配数量/字节、major fault、主动/被动上下文切换和堆栈。时间字段采用配置的 clock；默认配置为 boottime。
+`SamplingRecord` 保存事件类型、线程 ID、消息 ID、开始/结束单调时间与线程 CPU 时间、对象分配累计快照、major fault、主动/被动上下文切换累计快照和 ART 堆栈。详细字段、事件类型、编码顺序和解析行为见[数据解析流程中的 SamplingRecord](data-parsing-flow.md#621-字段说明)。当前默认配置为 `CLOCK_BOOTTIME`；瞬时事件的结束时间为 0，持续事件同时保存开始和结束时间。
 
 RingBuffer 使用递增 ticket 标识记录位置。容量用尽后槽位被覆盖；dump 根据 start/end token 导出仍可用区间。备份 buffer 用于 dump 等场景下继续接收写入，具体切换逻辑由 `PerfBuffer` 管理。
 
@@ -49,6 +49,8 @@ RingBuffer 使用递增 ticket 标识记录位置。容量用尽后槽位被覆�
 - 调试模式的 `force` 绕过 `lastJavaNano` 间隔判断；在线模式始终遵守硬间隔，即使调用方传入 `force` 也不会突破线上限流。
 - `captureAtEnd` 事件同时记录开始/结束时间和 CPU time；瞬时事件只记录当前时间。
 - `messageIndex` 与 `lastJavaNano` 是 thread-local，消息边界和采样限流互不跨线程。
+- 分配量和 rusage 字段是当前线程的累计快照，CLI 通过结束值减开始值得到区间增量；关闭相应统计开关时不要解释原始字段值。
+- `Stack` 最多保存 128 层；当前实现要求保存深度等于实际遍历深度，超过限制的栈不会以截断形式写出。
 
 ### Hook 组件
 

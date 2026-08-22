@@ -69,9 +69,9 @@
 | [`SamplingMappingDecoder`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/trace/SamplingMappingDecoder.java) | 解码方法指针符号和线程名 | SamplingTraceDecoder → MethodSymbol |
 | [`ProguardMappingDecoder`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/trace/ProguardMappingDecoder.java) | 解析 R8/ProGuard mapping 并还原方法签名 | SamplingTraceDecoder → MappingClass/Method 内部模型 |
 | [`StackList`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/trace/StackList.java) | 按格式版本解码单条采样记录和堆栈 | SamplingTraceDecoder → MethodSymbol/CallNode |
-| [`StackTraceConvertor`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/trace/StackTraceConvertor.java) | 按线程将采样记录转换为 slice/counter | SamplingTraceDecoder → Trace |
+| [`StackTraceConvertor`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/trace/StackTraceConvertor.java) | 按线程将采样记录转换为调用树、slice/counter，并支持点采样耗时重建 | SamplingTraceDecoder → Trace/JankAnalyzer |
 | [`JankArtifact`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/jank/JankArtifact.java) | 安全解包并校验线上 ZIP manifest/文件 | `JankMain` → 临时目录/采样文件 |
-| [`JankAnalyzer`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/jank/JankAnalyzer.java) | 统计精确 Hook 耗时、点采样和质量告警 | JankArtifact → SamplingTraceDecoder/JSON/Trace |
+| [`JankAnalyzer`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/jank/JankAnalyzer.java) | 输出主线程完整调用树、其他线程树、方法级精确/估算耗时和质量告警 | JankArtifact → SamplingTraceDecoder/CallNode/JSON/Trace |
 | [`JankMain`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/jank/JankMain.java) | `analyze-jank` 离线命令参数和输出 | Main → JankAnalyzer/JSON/Perfetto PB |
 | [`CallNode`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/trace/CallNode.java) | 表示转换过程中的调用节点/嵌套关系 | StackTraceConvertor 内部 |
 | [`MethodSymbol`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/trace/MethodSymbol.java) | 保存方法指针、偏移和符号文本 | MappingDecoder/StackList |

@@ -105,6 +105,26 @@ public class CallNode {
         return (endTime - beginTime);
     }
 
+    /** 返回调用节点的墙钟时间范围，供在线报告导出使用。 */
+    public long getBeginTimeNs() {
+        return beginTime;
+    }
+
+    /** 返回调用节点的结束时间，供在线报告导出使用。 */
+    public long getEndTimeNs() {
+        return endTime;
+    }
+
+    /** 返回调用节点的完整墙钟耗时。 */
+    public long getDurationNs() {
+        return durationNs();
+    }
+
+    /** 返回调用节点对应的方法名；根节点没有方法名。 */
+    public String getMethodName() {
+        return item == null || item.method == null ? null : item.method.symbol;
+    }
+
     long cpuDurationNs() {
         return (endCPUTime - beginCPUTime);
     }

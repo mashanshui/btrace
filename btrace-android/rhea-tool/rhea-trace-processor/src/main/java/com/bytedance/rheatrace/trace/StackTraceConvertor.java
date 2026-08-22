@@ -63,6 +63,17 @@ public class StackTraceConvertor {
     }
 
     public static CallNode decodeCallNode(List<StackList> items, boolean main) {
+        return decodeCallNode(items, main, false, 0);
+    }
+
+    /**
+     * Reconstructs a call tree for online reports. When point-sample estimation is enabled,
+     * a frame is considered active until the next observed stack instead of the short
+     * Perfetto gap used by the regular trace converter.
+     */
+    public static CallNode decodeCallNode(List<StackList> items, boolean main,
+                                          boolean estimatePointDurations,
+                                          long estimatedEndTime) {
         StackList first = items.get(0);
         CallNode root = new CallNode(first.tid, null, first.nanoTime, 0, 0, null, 0, 0, -1);
         Stack<CallNode> stack = new Stack<>();
@@ -102,8 +113,20 @@ public class StackTraceConvertor {
                     }
                 }
                 for (; preIndex < preStackList.size(); preIndex++) {
-                    long endTime = Long.min(nanoTime, preStackList.nanoTime + SINGLE_SAMPLING_DURATION);
-                    long endCpuTime = Long.min(nanoCPUTime, preStackList.nanoCPUTime + SINGLE_SAMPLING_DURATION);
+                    long endTime;
+                    long endCpuTime;
+                    if (preStackList.isDurationStack) {
+                        // The end record is an exact hook boundary. Do not extend it to the
+                        // next unrelated point sample when reconstructing online durations.
+                        endTime = Long.min(nanoTime, preStackList.nanoTime);
+                        endCpuTime = Long.min(nanoCPUTime, preStackList.nanoCPUTime);
+                    } else if (estimatePointDurations) {
+                        endTime = nanoTime;
+                        endCpuTime = nanoCPUTime;
+                    } else {
+                        endTime = Long.min(nanoTime, preStackList.nanoTime + SINGLE_SAMPLING_DURATION);
+                        endCpuTime = Long.min(nanoCPUTime, preStackList.nanoCPUTime + SINGLE_SAMPLING_DURATION);
+                    }
                     stack.pop().end(endTime, endCpuTime, i).setEnd(curStackList); // FIXME: 这里导致叶子函数内存偏大
                 }
                 for (; curIndex < curStackList.size(); curIndex++) {
@@ -120,8 +143,14 @@ public class StackTraceConvertor {
                 callNode.blockTime += curStackList.blockDuration;
             }
         }
+        long finalEndTime = estimatePointDurations
+                ? Math.max(nanoTime, estimatedEndTime)
+                : nanoTime + SINGLE_SAMPLING_DURATION;
+        long finalEndCpuTime = estimatePointDurations
+                ? nanoCPUTime + Math.max(0, estimatedEndTime - nanoTime)
+                : nanoCPUTime + SINGLE_SAMPLING_DURATION;
         while (!stack.isEmpty()) {
-            stack.pop().end(nanoTime + SINGLE_SAMPLING_DURATION, nanoCPUTime + SINGLE_SAMPLING_DURATION, items.size()).setEnd(items.get(items.size() - 1));
+            stack.pop().end(finalEndTime, finalEndCpuTime, items.size()).setEnd(items.get(items.size() - 1));
         }
         root.calculateSelfDurations();
         return root;
