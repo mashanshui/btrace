@@ -31,7 +31,8 @@ namespace trace {
  * @param shadowPause shadow pause means we don't remove the trace point when stop, just stop collecting tracing data
  * @return return true for successful initialization, return false otherwise.
  */
-bool init(JNIEnv *env, jlongArray pArray, bool enableObjectAllocationStub, bool enableWakeup, bool shadowPause);
+bool init(JNIEnv *env, jlongArray pArray, bool enableObjectAllocationStub, bool enableWakeup,
+          bool shadowPause, bool enableJniHook);
 
 } // namespace sampling
 } // namespace rheatrace

@@ -16,6 +16,7 @@
 package com.bytedance.rheatrace.trace.sampling;
 
 import com.bytedance.rheatrace.prop.TraceProperties;
+import com.bytedance.rheatrace.TraceManager;
 import com.bytedance.rheatrace.trace.base.TraceConfigCreator;
 
 public class SamplingConfigCreator implements TraceConfigCreator<SamplingConfig> {
@@ -23,6 +24,24 @@ public class SamplingConfigCreator implements TraceConfigCreator<SamplingConfig>
     @Override
     public SamplingConfig create() {
         SamplingConfig config = new SamplingConfig(this);
+        if (TraceManager.isOnlineMode()) {
+            config.setBufferSize(TraceManager.getOnlineBufferCapacityRecords());
+            long intervalNs = TraceManager.getOnlineSampleIntervalNs();
+            config.setMainThreadIntervalNs(intervalNs);
+            config.setOtherThreadIntervalNs(intervalNs);
+            config.setClockType(2); // boottime
+            config.setStackWalkKind(0);
+            // 在线首版只保留主线程同步抓栈，关闭高成本的附加统计。
+            config.setEnableRusage(TraceManager.isOnlineRusageEnabled());
+            config.setDisableObjectAllocation(!TraceManager.isOnlineObjectAllocationEnabled());
+            config.setEnableWakeup(TraceManager.isOnlineWakeupEnabled());
+            config.setEnableJniHook(TraceManager.isOnlineJniHookEnabled());
+            config.setEnableThreadNames(true);
+            config.setShadowPause(true);
+            config.setOnlineMode(true);
+            config.setMainThreadOnly(true);
+            return config;
+        }
         config.setBufferSize(TraceProperties.getCoreBufferSizeOrDefault(SamplingConfig.OFFLINE_BUFFER_SIZE_DEFAULT));
         long intervalNs = TraceProperties.getSampleIntervalOrDefault(SamplingConfig.OFFLINE_JAVA_SAMPLE_INTERVAL_DEFAULT);
         config.setMainThreadIntervalNs(intervalNs);
@@ -39,6 +58,12 @@ public class SamplingConfigCreator implements TraceConfigCreator<SamplingConfig>
 
     @Override
     public void update(SamplingConfig config) {
+        if (TraceManager.isOnlineMode()) {
+            long intervalNs = TraceManager.getOnlineSampleIntervalNs();
+            config.setMainThreadIntervalNs(intervalNs);
+            config.setOtherThreadIntervalNs(intervalNs);
+            return;
+        }
         long intervalNs = TraceProperties.getSampleIntervalOrDefault(SamplingConfig.OFFLINE_JAVA_SAMPLE_INTERVAL_DEFAULT);
         config.setMainThreadIntervalNs(intervalNs);
         config.setOtherThreadIntervalNs(intervalNs);

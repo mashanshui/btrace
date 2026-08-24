@@ -3,7 +3,7 @@ package rhea.sample.android
 import android.util.Log
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.bytedance.rheatrace.core.TraceStub
+import com.bytedance.rheatrace.RheaTrace3
 
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -30,9 +30,9 @@ class ExampleInstrumentedTest {
     }
 
     @Test
-     fun testTraceStub() {
-        val testCounts = 10
-        val loopCount = 1000000
+     fun testCaptureStackTrace() {
+        val testCounts = 2
+        val loopCount = 10000
 
         val ids: Array<String?> = arrayOfNulls(loopCount)
         for (i in 0 until loopCount) {
@@ -41,8 +41,7 @@ class ExampleInstrumentedTest {
         for (time in 0 until testCounts) {
             val start = System.currentTimeMillis()
             for (id in ids) {
-                TraceStub.i(id)
-                TraceStub.o(id)
+                RheaTrace3.captureStackTrace(false)
             }
             Log.d(TAG, "unit test cost: " + (System.currentTimeMillis() - start) + "ms")
         }

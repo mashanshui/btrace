@@ -28,17 +28,22 @@
 
 
 extern "C"
-JNIEXPORT void JNICALL
+JNIEXPORT jboolean JNICALL
 Java_com_bytedance_rheatrace_trace_base_TraceGlobal_nativeInit(JNIEnv* env, jclass clazz, jobject main_thread) {
     int shadow_result = shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
     if (shadow_result != SHADOWHOOK_ERRNO_OK) {
         ALOGE("shadowhook_init failed %d", shadow_result);
+        return JNI_FALSE;
     }
     rheatrace::RheaContext::javaMainThread = env->NewGlobalRef(main_thread);
+    if (rheatrace::RheaContext::javaMainThread == nullptr) {
+        ALOGE("create main thread global reference failed");
+        return JNI_FALSE;
+    }
     if (!rheatrace::init_thread_list()) {
         ALOGE("init_thread_list failed");
     }
-
+    return JNI_TRUE;
 }
 extern "C"
 JNIEXPORT void JNICALL
@@ -47,4 +52,12 @@ Java_com_bytedance_rheatrace_trace_base_TraceGlobal_nativeCapture(JNIEnv* env, j
     if (collector != nullptr) {
         collector->request(rheatrace::SamplingType::kCustom, nullptr, force);
     }
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_bytedance_rheatrace_trace_base_TraceGlobal_nativeSetOnlineEnabled(JNIEnv* env,
+                                                                            jclass clazz,
+                                                                            jboolean enabled) {
+    rheatrace::SamplingCollector::setOnlineEnabled(enabled == JNI_TRUE);
 }

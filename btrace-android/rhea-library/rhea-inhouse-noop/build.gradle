@@ -30,3 +30,7 @@ android {
 
 apply from: rootProject.file('gradle/android-artifacts.gradle')
 apply from: rootProject.file('gradle/gradle-maven-upload.gradle')
+
+dependencies {
+	testImplementation 'junit:junit:4.13.2'
+}

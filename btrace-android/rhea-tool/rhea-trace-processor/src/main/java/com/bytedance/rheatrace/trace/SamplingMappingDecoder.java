@@ -17,8 +17,10 @@ package com.bytedance.rheatrace.trace;
 
 import com.bytedance.rheatrace.Log;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -31,38 +33,43 @@ public class SamplingMappingDecoder {
         this.mappingBytes = mappingBytes;
     }
 
-    public SamplingMappingDecoder decode() {
+    public SamplingMappingDecoder decode() throws IOException {
         ByteBuffer buffer = ByteBuffer.wrap(mappingBytes).order(ByteOrder.LITTLE_ENDIAN);
-        if (buffer.remaining() < 8) {
-            return this;
+        if (buffer.remaining() < 16) {
+            throw new IOException("sampling mapping 文件头不完整");
         }
         long maybeMagic = buffer.getLong();
         int version = buffer.getInt();
         int count = buffer.getInt();
+        if (maybeMagic != 0 || version != 1 || count < 0) {
+            throw new IOException("sampling mapping 文件头无效");
+        }
         for (int i = 0; i < count; i++) {
-            if (buffer.remaining() > 12) {
-                long pointer = buffer.getLong();
-                short len = buffer.getShort();
-                if (len > 0) {
-                    byte[] b = new byte[len];
-                    buffer.get(b);
-                    symbolMapping.put(pointer, new MethodSymbol(pointer, 0, new String(b)));
-                }
-            } else {
-                break;
+            if (buffer.remaining() < 10) {
+                throw new IOException("sampling mapping 方法记录被截断");
             }
+            long pointer = buffer.getLong();
+            int len = buffer.getShort() & 0xffff;
+            if (len <= 0 || len > buffer.remaining()) {
+                throw new IOException("sampling mapping 方法名长度无效");
+            }
+            byte[] b = new byte[len];
+            buffer.get(b);
+            symbolMapping.put(pointer, new MethodSymbol(pointer, 0,
+                    new String(b, StandardCharsets.UTF_8)));
         }
         while (buffer.hasRemaining()) {
-            int tid = buffer.getShort();
-            int len = buffer.get();
-            if (len > 0 && len <= buffer.remaining()) {
-                byte[] name = new byte[len];
-                buffer.get(name);
-                threadNames.put(tid, new String(name));
-            } else {
-                Log.e("Decode thread names failed: buffer underflow, expected name length is " + len + ", actual remaining length is " + buffer.remaining());
-                break;
+            if (buffer.remaining() < 3) {
+                throw new IOException("sampling mapping 线程记录被截断");
             }
+            int tid = buffer.getShort() & 0xffff;
+            int len = buffer.get() & 0xff;
+            if (len <= 0 || len > buffer.remaining()) {
+                throw new IOException("sampling mapping 线程名长度无效");
+            }
+            byte[] name = new byte[len];
+            buffer.get(name);
+            threadNames.put(tid, new String(name, StandardCharsets.UTF_8));
         }
         return this;
     }

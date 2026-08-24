@@ -24,6 +24,7 @@
 #include <setjmp.h>
 #include <sys/resource.h>
 #include <dirent.h>
+#include <new>
 #include <string>
 
 #include "../utils/time.h"
@@ -35,22 +36,37 @@
 
 namespace rheatrace {
 
-SamplingCollector* SamplingCollector::sInstance = nullptr;
+std::atomic<SamplingCollector*> SamplingCollector::sInstance{nullptr};
+std::atomic<bool> SamplingCollector::sOnlineEnabled{false};
 
 static uint64_t getStackRecordTime(SamplingRecord& r) {
     return r.mEndNanoTime == 0 ? r.mNanoTime : r.mEndNanoTime;
 }
 
 SamplingCollector* SamplingCollector::create(JNIEnv* env, jlongArray rawConfig) {
-    if (sInstance == nullptr) {
+    auto* instance = sInstance.load(std::memory_order_acquire);
+    if (instance == nullptr) {
         SamplingConfig config(env, rawConfig);
         auto* buffer = PerfBuffer<SamplingRecord>::create(config.capacity, getStackRecordTime);
+        if (buffer == nullptr) {
+            ALOGE("create sampling buffer failed, capacity=%lld",
+                  static_cast<long long>(config.capacity));
+            return nullptr;
+        }
         struct timespec ts{};
         clock_getres(config.clockId, &ts);
-        ALOGI("clockId is %d, resolution is %ldns, visitKind is %d, interval is %ldns", config.clockId, ts.tv_nsec, config.stackWalkKind, config.mainThreadJavaIntervalNs);
-        sInstance = new SamplingCollector(buffer, config);
+        ALOGI("clockId is %d, resolution is %ldns, visitKind is %d, interval is %lluns",
+              config.clockId, ts.tv_nsec, config.stackWalkKind,
+              static_cast<unsigned long long>(config.mainThreadJavaIntervalNs));
+        instance = new(std::nothrow) SamplingCollector(buffer, config);
+        if (instance == nullptr) {
+            delete buffer;
+            ALOGE("create sampling collector failed");
+            return nullptr;
+        }
+        sInstance.store(instance, std::memory_order_release);
     }
-    return sInstance;
+    return instance;
 }
 
 thread_local uint64_t lastJavaNano = 0;
@@ -61,17 +77,39 @@ void SamplingCollector::newJavaMessageWillBegin() {
     messageIndex++;
 }
 
+bool SamplingCollector::shouldCaptureCurrentThread() {
+    auto* collector = getInstance();
+    if (collector == nullptr || collector->isPaused()) {
+        return false;
+    }
+    if (!collector->config.onlineMode) {
+        return true;
+    }
+    return sOnlineEnabled.load(std::memory_order_acquire)
+            && (!collector->config.mainThreadOnly || is_main_thread());
+}
+
 bool SamplingCollector::request(SamplingType type, void* self, bool force, bool captureAtEnd,
                                 uint64_t beginNano, uint64_t beginCpuNano) {
     auto* collector = SamplingCollector::getInstance();
     if (collector == nullptr || collector->isPaused()) {
         return false;
     }
+    const bool mainThread = is_main_thread();
+    if (collector->config.onlineMode) {
+        if (!sOnlineEnabled.load(std::memory_order_acquire)
+                || (collector->config.mainThreadOnly && !mainThread)) {
+            return false;
+        }
+    }
     auto currentNano = current_clock_id_time_nanos(collector->config.clockId);
-    if (force || currentNano - lastJavaNano > (is_main_thread() ? collector->config.mainThreadJavaIntervalNs
-                                                                : collector->config.otherThreadJavaIntervalNs)) {
+    const uint64_t intervalNs = mainThread ? collector->config.mainThreadJavaIntervalNs
+                                           : collector->config.otherThreadJavaIntervalNs;
+    // 在线模式始终遵守硬间隔，避免调用方传入 force 造成线上抖动。
+    if ((collector->config.onlineMode ? false : force)
+            || currentNano - lastJavaNano > intervalNs) {
         lastJavaNano = currentNano;
-        SamplingRecord r;
+        SamplingRecord r{};
         if (StackVisitor::visitOnce(r.mStack, self, collector->config.stackWalkKind)) {
             if (r.mStack.mSavedDepth == 0 || r.mStack.mSavedDepth != r.mStack.mActualDepth) {
                 return false;
@@ -108,14 +146,25 @@ bool SamplingCollector::request(SamplingType type, void* self, bool force, bool 
         collector->write(r);
         return true;
     }
+    collector->droppedByRateLimit.fetch_add(1, std::memory_order_relaxed);
     return false;
 }
 
-void SamplingCollector::start(JNIEnv* env, jlongArray asyncConfigs) {
-    paused = false;
-    StackVisitor::init();
-    trace::init(env, asyncConfigs, config.enableObjectAllocationStub, config.enableWakeup,
-                config.shadowPauseMode);
+bool SamplingCollector::start(JNIEnv* env, jlongArray asyncConfigs) {
+    if (!StackVisitor::init()) {
+        ALOGE("StackVisitor init failed");
+        return false;
+    }
+    if (!trace::init(env, asyncConfigs, config.enableObjectAllocationStub, config.enableWakeup,
+                     config.shadowPauseMode, config.enableJniHook)) {
+        ALOGE("sampling hooks init failed");
+        return false;
+    }
+    paused.store(false, std::memory_order_release);
+    if (config.onlineMode) {
+        sOnlineEnabled.store(true, std::memory_order_release);
+    }
+    return true;
 }
 
 class SamplingDumper : public Dumper {
@@ -217,10 +266,10 @@ bool SamplingDumper::dumpMapping(int fd) {
                         }
                     }
                 }
+                closedir(dir);
             }
-            closedir(dir);
             auto cost = current_boot_time_millis() - now;
-            ALOGD("dump thread names cost %lums", cost);
+            ALOGD("dump thread names cost %llums", static_cast<unsigned long long>(cost));
         }
         return true;
     } else {

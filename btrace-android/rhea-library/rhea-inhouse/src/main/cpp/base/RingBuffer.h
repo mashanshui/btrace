@@ -16,7 +16,9 @@
 #pragma once
 
 #include <atomic>
+#include <cstring>
 #include <iterator>
+#include <new>
 #include <type_traits>
 #include <algorithm>
 #include <sys/mman.h>
@@ -62,6 +64,12 @@ class Slot<T, false> {
 public:
     T data;
 
+    Slot() noexcept : data{} {}
+
+    void clear() {
+        memset(&data, 0, sizeof(T));
+    }
+
     T& ref() {
         return data;
     }
@@ -73,6 +81,10 @@ public:
     bool read(T& dest) {
         memcpy(&dest, &data, sizeof(T));
         return true;
+    }
+
+    bool read(int64_t expectedTicket, T& dest) {
+        return read(dest);
     }
 
     void atomicWrite(int64_t newTicket, T& value) {
@@ -98,6 +110,14 @@ public:
     T data;
     std::atomic_int64_t postTicket;
 
+    Slot() noexcept : preTicket(-1), data{}, postTicket(-1) {}
+
+    void clear() {
+        preTicket.store(-1, std::memory_order_relaxed);
+        memset(&data, 0, sizeof(T));
+        postTicket.store(-1, std::memory_order_relaxed);
+    }
+
     T& ref() {
         return data;
     }
@@ -116,6 +136,16 @@ public:
             return true;
         }
         return false;
+    }
+
+    bool read(int64_t expectedTicket, T& dest) {
+        int64_t ticketPre = preTicket.load(std::memory_order_acquire);
+        if (ticketPre != expectedTicket) {
+            return false;
+        }
+        memcpy(&dest, &data, sizeof(T));
+        int64_t ticketPost = postTicket.load(std::memory_order_acquire);
+        return ticketPre == ticketPost && ticketPost == expectedTicket;
     }
 
     void atomicWrite(int64_t newTicket, T& value) {
@@ -161,7 +191,6 @@ private:
     const uint32_t mCapacity;
     std::atomic<int64_t>& mTicket;
     GetTimeFn<T> mGetTimeFn;
-    bool mInConcurrentSafeMode;
     Slot<T, kFat> mSlots[];
 public:
     static constexpr size_t calculateAllocationSize(size_t entryCount) {
@@ -191,6 +220,10 @@ public:
 
     T& getAt(int64_t ticket) {
         return mSlots[index(ticket)].ref();
+    }
+
+    bool readAt(int64_t ticket, T* out) {
+        return out != nullptr && mSlots[index(ticket)].read(ticket, *out);
     }
 
     // Find earliest ticket whose slot record time is great than or equal to target time
@@ -239,80 +272,68 @@ public:
 
     int64_t write(T& value) {
         int64_t ticket = mTicket.fetch_add(1);
-        if (__builtin_expect(mInConcurrentSafeMode, false)) {
-            mSlots[index(ticket)].atomicWrite(ticket, value);
-        } else {
-            mSlots[index(ticket)].write(ticket, value);
-        }
+        mSlots[index(ticket)].write(ticket, value);
         return ticket;
     }
 
     void writesBack(RingBuffer<T>& backupBuffer, int64_t startTicket, int64_t endTicket) {
-        mInConcurrentSafeMode = true;
-        for (auto i = endTicket; i > startTicket ; --i) {
-            auto idx = index(i);
-            if (!mSlots[idx].atomicTryWrite(std::max(int64_t(0), i - mCapacity), i, backupBuffer.mSlots[idx].data, mGetTimeFn)) {
-                // This means data in current position is probably expired, trying to write previous slot.
-                // if still expired, break the write back process.
-                auto preIdx = index(i - 1);
-                if (!mSlots[preIdx].atomicTryWrite(std::max(int64_t(0), i - mCapacity - 1), i - 1, backupBuffer.mSlots[preIdx].data, mGetTimeFn)) {
-                    break;
-                } else {
-                    // This means data is not strictly time sorted, but not expired, we can write it back.
-                    mSlots[idx].atomicWrite(i, backupBuffer.mSlots[idx].data);
-                }
+        T value;
+        for (int64_t ticket = startTicket; ticket <= endTicket; ++ticket) {
+            if (backupBuffer.readAt(ticket, &value)) {
+                mSlots[index(ticket)].write(ticket, value);
             }
         }
-        auto startIdx = index(startTicket);
-        mSlots[startIdx].atomicTryWrite(std::max(int64_t(0), startTicket), startTicket, backupBuffer.mSlots[startIdx].data, mGetTimeFn);
-        mInConcurrentSafeMode = false;
     }
 
     /**
      * For backup buffer, find the accurate range of tickets tha has valid slot record.
      * Note: We assume that the timestamp of invalid slot record is 0.
      * @param roughStartTicket rough start ticket, less than or equal to accurate start ticket
-     * @param roughEndTicket rough end ticket, greater than or equal to accurate end ticket
+     * @param roughEndTicket exclusive rough end ticket
      * @return true if finding succeed, false otherwise
      */
     bool findValidTicketRange(int64_t roughStartTicket, int64_t roughEndTicket, int64_t *outStart,
                               int64_t *outEnd) {
         *outStart = -1;
         *outEnd = -1;
+        if (roughEndTicket <= roughStartTicket) {
+            return false;
+        }
         T value;
-        for (auto i = roughStartTicket; i <= roughEndTicket; ++i) {
-            if (mSlots[index(i)].read(value) && mGetTimeFn(value) > 0) {
+        const int64_t lastTicket = roughEndTicket - 1;
+        for (auto i = roughStartTicket; i <= lastTicket; ++i) {
+            if (mSlots[index(i)].read(i, value) && mGetTimeFn(value) > 0) {
                 *outStart = i;
                 break;
             }
         }
-        for (auto i = roughEndTicket; i >= roughStartTicket; --i) {
-            if (mSlots[index(i)].read(value) && mGetTimeFn(value) > 0) {
+        for (auto i = lastTicket; i >= roughStartTicket; --i) {
+            if (mSlots[index(i)].read(i, value) && mGetTimeFn(value) > 0) {
                 *outEnd = i;
                 break;
             }
         }
-        return *outStart >= 0 && *outEnd >= 0 && *outEnd > *outStart;
+        return *outStart >= 0 && *outEnd >= 0 && *outEnd >= *outStart;
     }
 
     int64_t quickDump(T* dest, int64_t startTicket, int64_t endTicket) {
 //        int64_t endTicket = currentTicket;
 //        int64_t startTicket = std::max(int64_t(0), endTicket - mCapacity);
-        int64_t splitTicket;
-        if (splitTicketRange(startTicket, endTicket, &splitTicket)) {
-            memcpy(dest, mSlots + index(startTicket),
-                   sizeof(T) * (splitTicket - startTicket));
-            memcpy(dest + splitTicket - startTicket, mSlots + index(splitTicket),
-                   sizeof(T) * (endTicket - splitTicket));
-        } else {
-            memcpy(dest, mSlots + index(startTicket), sizeof(T) * (endTicket - startTicket));
+        int64_t copied = 0;
+        for (int64_t ticket = startTicket; ticket < endTicket; ++ticket) {
+            if (!readAt(ticket, dest + copied)) {
+                memset(dest + copied, 0, sizeof(T));
+            }
+            ++copied;
         }
-        return endTicket - startTicket;
+        return copied;
     }
 
 
     void clear() {
-        memset(mSlots, 0, sizeof(T) * mCapacity);
+        for (uint32_t i = 0; i < mCapacity; ++i) {
+            mSlots[i].clear();
+        }
     }
 
 private:
@@ -325,7 +346,7 @@ private:
     }
 
     explicit RingBuffer(uint32_t capacity, std::atomic<int64_t>& ticket, GetTimeFn<T> getTimeFn) noexcept
-            :mCapacity(capacity), mTicket(ticket), mGetTimeFn(getTimeFn), mInConcurrentSafeMode(false) {}
+            :mCapacity(capacity), mTicket(ticket), mGetTimeFn(getTimeFn) {}
 
     ~RingBuffer() {
         _destroy_n(mSlots, mCapacity);

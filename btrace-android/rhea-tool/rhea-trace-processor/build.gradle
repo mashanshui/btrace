@@ -15,9 +15,12 @@ dependencies {
     implementation 'org.apache.commons:commons-lang3:3.12.0'
     implementation 'com.google.protobuf:protobuf-java:4.29.3'
     implementation 'org.json:json:20231013'
+    testImplementation 'junit:junit:4.13.2'
 }
 
 jar {
+    // 运行时依赖的许可证文件名称相同，保留一份即可生成可执行 fat-JAR。
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     manifest {
         attributes(
                 'Main-Class': 'com.bytedance.rheatrace.Main',
@@ -28,6 +31,14 @@ jar {
     from {
         configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
     }
+}
+
+javadoc {
+    exclude 'perfetto/protos/**'
+    options.encoding = 'UTF-8'
+    options.charSet = 'UTF-8'
+    options.addStringOption('Xdoclint:none', '-quiet')
+    failOnError = false
 }
 
 apply from: rootProject.file('gradle/java-artifacts.gradle')

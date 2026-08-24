@@ -4,6 +4,10 @@
 
 ## 正文
 
+### 线上堆栈 ZIP
+
+线上导出文件使用 `.rheatrace.zip`，固定包含 `manifest.json`、`sampling.bin` 和 `sampling-mapping.bin`。manifest 的 `selectionType` 为 `RANGE` 或 `ALL`，时间字段统一使用 elapsed realtime 纳秒；二进制文件继续使用下文的 Sampling v5 和 mapping v1 格式。处理器会限制解压总量、拒绝额外/重复/越界条目，并校验 manifest 中声明的大小和 SHA-256。
+
 ### HTTP 控制协议
 
 端上使用 NanoHTTPD 在随机端口启动 HTTP/1.x 服务。CLI 通过 ADB forward 后以 GET 请求访问根路径。该协议仅用于本机调试链路，没有鉴权、TLS 或稳定公共 API 承诺。

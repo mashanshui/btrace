@@ -37,8 +37,17 @@ public class ProguardMappingDecoder {
     private final LineInfo currentLine = new LineInfo();
 
     ProguardMappingDecoder() {
-        mappingFile = new File(Arguments.get().mappingPath);
+        this(new File(Arguments.get().mappingPath));
+    }
+
+    /** 供线上产物离线解析使用，不依赖全局 Arguments。 */
+    public ProguardMappingDecoder(String mappingPath) {
+        this(new File(mappingPath));
+    }
+
+    private ProguardMappingDecoder(File mappingFile) {
         classMap = new HashMap<>();
+        this.mappingFile = mappingFile;
     }
 
     public void decode() throws IOException {

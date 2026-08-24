@@ -12,6 +12,9 @@
 | --- | --- | --- |
 | `init(Context)` | 主进程中初始化 TraceManager，可能启动启动阶段采集，并启动 HTTP 服务 | 应尽可能早地在 `attachBaseContext` 调用；非主进程直接返回 |
 | `captureStackTrace(boolean force)` | 转发到 Native `TraceGlobal.capture`，在 Collector 工作时主动抓取当前线程栈 | `force=true` 只绕过时间间隔限制，不保证采集一定成功 |
+| `initOnline(Application, OnlineTraceConfig)` | 启动低损耗线上常驻采集 | API 26+、64 位 arm64、主进程；与调试模式互斥 |
+| `exportStackData(startNs, endNs, callback)` | 按 elapsed realtime 半开区间异步导出 | 不判断卡顿，不清空缓冲区；同一时刻只执行一个任务 |
+| `exportAllStackData(callback)` | 异步导出快照时全部有效记录 | RingBuffer 已覆盖的数据无法恢复 |
 
 noop 制品保留相同类和方法签名，方法体为空。业务代码只依赖 `RheaTrace3`，不应直接使用 `TraceManager`、`TraceProperties` 或 `trace.*` 包。
 

@@ -129,8 +129,38 @@ public class StackList {
         return stackTrace.size();
     }
 
+    public long getNanoTime() {
+        return nanoTime;
+    }
+
+    public int getTid() {
+        return tid;
+    }
+
+    public int getType() {
+        return type;
+    }
+
+    public boolean isDurationStack() {
+        return isDurationStack;
+    }
+
+    public long getDuration() {
+        return duration;
+    }
+
     public String getName(int i) {
         return get(i).method.symbol;
+    }
+
+    public List<String> getNames() {
+        List<String> names = new ArrayList<>(stackTrace.size());
+        for (StackItem item : stackTrace) {
+            if (item.method != null) {
+                names.add(item.method.symbol);
+            }
+        }
+        return names;
     }
 
     public long getPtr(int i) {

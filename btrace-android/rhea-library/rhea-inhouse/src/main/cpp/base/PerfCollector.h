@@ -27,7 +27,7 @@ class PerfCollector {
 public:
     virtual ~PerfCollector() {};
 
-    virtual void start(JNIEnv* env, jlongArray asyncConfigs) = 0;
+    virtual bool start(JNIEnv* env, jlongArray asyncConfigs) = 0;
 
     virtual void updateConfigs(JNIEnv* env, jlongArray configs) = 0;
 
@@ -36,7 +36,20 @@ public:
     virtual int dumpPart(JNIEnv* env, const char* outDir, const char* extra, int32_t extraLen,
                          int64_t startTicket, int64_t endTicket) = 0;
 
+    virtual int dumpTimeRange(JNIEnv* env, const char* outDir, const char* extra, int32_t extraLen,
+                              uint64_t startTimeNanos, uint64_t endTimeNanos,
+                              int64_t snapshotEndTicket, uint64_t* actualStartTimeNanos,
+                              uint64_t* actualEndTimeNanos, uint32_t* dumpedRecordCount) = 0;
+
+    virtual bool getTimeRange(uint64_t* startTimeNanos, uint64_t* endTimeNanos,
+                              uint32_t* recordCount, uint64_t* overwrittenCount,
+                              int64_t* snapshotEndTicket) = 0;
+
     virtual int64_t mark() = 0;
+
+    virtual uint64_t getDroppedByRateLimit() {
+        return 0;
+    }
 
     virtual void stop() = 0;
 };

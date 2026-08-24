@@ -22,6 +22,7 @@
 #include "StackVisitor.h"
 #include "../utils/time.h"
 #include <unistd.h>
+#include <atomic>
 
 namespace rheatrace {
 
@@ -34,29 +35,39 @@ class SamplingCollector : public PerfCollectorBaseImpl<rheatrace::TYPE_SAMPLING,
 public:
     static SamplingCollector* create(JNIEnv* env, jlongArray configs);
 
-    static void destroy() {
-        if (sInstance != nullptr) {
-            delete sInstance;
-            sInstance = nullptr;
+    static bool destroy() {
+        auto* instance = sInstance.load(std::memory_order_acquire);
+        if (instance != nullptr) {
+            instance->stop();
         }
+        return false;
     }
 
     static SamplingCollector* getInstance() {
-        return sInstance;
+        return sInstance.load(std::memory_order_acquire);
+    }
+
+    static void setOnlineEnabled(bool enabled) {
+        sOnlineEnabled.store(enabled, std::memory_order_release);
     }
 
     static bool
     request(SamplingType type, void* self = nullptr, bool force = false, bool captureAtEnd = false,
             uint64_t beginNano = 0, uint64_t beginCpuNano = 0);
 
+    static bool shouldCaptureCurrentThread();
+
     static void newJavaMessageWillBegin();
 
-    void start(JNIEnv* env, jlongArray asyncConfigs) override;
+    bool start(JNIEnv* env, jlongArray asyncConfigs) override;
 
     void updateConfigs(JNIEnv* env, jlongArray configs) override;
 
     void stop() override {
-        paused = true;
+        paused.store(true, std::memory_order_release);
+        if (config.onlineMode) {
+            sOnlineEnabled.store(false, std::memory_order_release);
+        }
     }
 
     int64_t write(SamplingRecord& r) {
@@ -64,7 +75,11 @@ public:
     }
 
     bool isPaused() const {
-        return paused;
+        return paused.load(std::memory_order_acquire);
+    }
+
+    uint64_t getDroppedByRateLimit() override {
+        return droppedByRateLimit.load(std::memory_order_relaxed);
     }
 
 protected:
@@ -75,16 +90,29 @@ protected:
 
     const char* getDumpMappingFileName() override;
 
+    uint64_t getRecordStartTimeNanos(SamplingRecord& record) override {
+        return record.mNanoTime;
+    }
+
+    uint64_t getRecordEndTimeNanos(SamplingRecord& record) override {
+        if (record.mEndNanoTime > record.mNanoTime) {
+            return record.mEndNanoTime;
+        }
+        return record.mNanoTime == UINT64_MAX ? UINT64_MAX : record.mNanoTime + 1;
+    }
+
 private:
 
     SamplingCollector(PerfBuffer<SamplingRecord>* buffer, SamplingConfig& config)
             : PerfCollectorBaseImpl<rheatrace::TYPE_SAMPLING, 5, false, SamplingRecord>(buffer),
-              config(config), paused(false) {
+              config(config), paused(true) {
     }
 
-    static SamplingCollector* sInstance;
+    static std::atomic<SamplingCollector*> sInstance;
+    static std::atomic<bool> sOnlineEnabled;
     SamplingConfig config;
-    bool paused;
+    std::atomic<bool> paused;
+    std::atomic<uint64_t> droppedByRateLimit{0};
 };
 
 class ScopeSampling {
@@ -98,15 +126,19 @@ private:
     bool condition_;
     pid_t tid;
 public:
-    explicit ScopeSampling(SamplingType type, void *self = nullptr, bool force = false) : type_(type), self_(self), force_(force), condition_(true), tid(gettid()) {
-        beginNano_ = current_boot_time_nanos();
-        beginCpuNano_ = current_thread_cpu_time_nanos();
+    explicit ScopeSampling(SamplingType type, void *self = nullptr, bool force = false)
+            : beginNano_(0), self_(self), type_(type), beginCpuNano_(0), force_(force),
+              condition_(SamplingCollector::shouldCaptureCurrentThread()), tid(gettid()) {
+        if (condition_) {
+            beginNano_ = current_boot_time_nanos();
+            beginCpuNano_ = current_thread_cpu_time_nanos();
+        }
     }
 
     ScopeSampling(ScopeSampling&) = delete;
 
     void setCondition(bool cond) {
-        condition_ = cond;
+        condition_ = condition_ && cond;
     }
 
     ~ScopeSampling() {

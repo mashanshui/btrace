@@ -18,6 +18,8 @@
 
 #include <errno.h>
 #include <unistd.h>
+#include <limits>
+#include <vector>
 #include "RingBuffer.h"
 #include "common_write.h"
 
@@ -37,7 +39,8 @@ private:
     std::atomic<int64_t> mTicket;
     RingBuffer<T>* mMajorBuffer;
     RingBuffer<T>* mBackupBuffer;
-    bool mUseBackupBuffer;
+    std::atomic<bool> mUseBackupBuffer;
+    std::atomic_flag mRouteLock = ATOMIC_FLAG_INIT;
     void* mMemoryArea;
     size_t mMemroyAreaSize;
 
@@ -47,9 +50,11 @@ private:
         int64_t mRoughStartTicket;
     public:
         AutoSwitchBufferHandler(PerfBuffer<T>& perfBuffer) : mPerfBuffer(perfBuffer) {
+            mPerfBuffer.lockRoute();
             mPerfBuffer.mBackupBuffer->clear();
             mRoughStartTicket = mPerfBuffer.mMajorBuffer->getCurrentTicket();
-            mPerfBuffer.mUseBackupBuffer = true;
+            mPerfBuffer.mUseBackupBuffer.store(true, std::memory_order_release);
+            mPerfBuffer.unlockRoute();
         }
 
         int64_t getMarkedTicket() {
@@ -58,7 +63,8 @@ private:
 
         ~AutoSwitchBufferHandler() {
             auto* backupBuffer = mPerfBuffer.mBackupBuffer;
-            mPerfBuffer.mUseBackupBuffer = false;
+            mPerfBuffer.lockRoute();
+            mPerfBuffer.mUseBackupBuffer.store(false, std::memory_order_release);
             int64_t roughEndTicket = mPerfBuffer.mMajorBuffer->getCurrentTicket();
             int64_t accurateStartTicket, accurateEndTicket;
             if (backupBuffer->findValidTicketRange(mRoughStartTicket, roughEndTicket,
@@ -66,6 +72,7 @@ private:
                                                    &accurateEndTicket)) {
                 mPerfBuffer.mMajorBuffer->writesBack(*backupBuffer, accurateStartTicket, accurateEndTicket);
             }
+            mPerfBuffer.unlockRoute();
         }
     };
 
@@ -94,6 +101,8 @@ public:
     }
 
     ~PerfBuffer() {
+        mMajorBuffer->~RingBuffer<T>();
+        mBackupBuffer->~RingBuffer<T>();
         munmap(mMemoryArea, mMemroyAreaSize);
     }
 
@@ -102,7 +111,10 @@ public:
     }
 
     int64_t write(T& value) {
-        return getCurrentRingBuffer()->write(value);
+        lockRoute();
+        int64_t ticket = getCurrentRingBuffer()->write(value);
+        unlockRoute();
+        return ticket;
     }
 
     int64_t mark() {
@@ -150,9 +162,96 @@ public:
         return 9;
     }
 
+    template<typename GetStartTimeFn, typename GetEndTimeFn>
+    bool getTimeRange(uint64_t* startTimeNanos, uint64_t* endTimeNanos,
+                      uint32_t* recordCount, uint64_t* overwrittenCount,
+                      int64_t* snapshotEndTicket,
+                      GetStartTimeFn getStartTime, GetEndTimeFn getEndTime) {
+        AutoSwitchBufferHandler handler(*this);
+        int64_t endTicket = handler.getMarkedTicket();
+        if (snapshotEndTicket != nullptr) {
+            *snapshotEndTicket = endTicket;
+        }
+        uint32_t count = mMajorBuffer->availableCount(endTicket);
+        uint64_t earliest = std::numeric_limits<uint64_t>::max();
+        uint64_t latest = 0;
+        uint32_t validCount = 0;
+        T value;
+        for (int64_t ticket = endTicket - count; ticket < endTicket; ++ticket) {
+            if (!mMajorBuffer->readAt(ticket, &value)) {
+                continue;
+            }
+            earliest = std::min(earliest, getStartTime(value));
+            latest = std::max(latest, getEndTime(value));
+            ++validCount;
+        }
+        if (recordCount != nullptr) {
+            *recordCount = validCount;
+        }
+        if (overwrittenCount != nullptr) {
+            *overwrittenCount = endTicket > int64_t(mMajorBuffer->capacity())
+                    ? uint64_t(endTicket - mMajorBuffer->capacity()) : 0;
+        }
+        if (validCount == 0) {
+            return false;
+        }
+        *startTimeNanos = earliest;
+        *endTimeNanos = latest;
+        return true;
+    }
+
+    template<typename GetStartTimeFn, typename GetEndTimeFn>
+    int dumpTimeRange(JNIEnv* env, int fd, int mappingFd, uint32_t type, uint32_t version,
+                      uint64_t time, const char* extra, int32_t extraLen, bool dumpRaw,
+                      Dumper* dumper, uint64_t startTimeNanos, uint64_t endTimeNanos,
+                      int64_t snapshotEndTicket, uint64_t* actualStartTimeNanos,
+                      uint64_t* actualEndTimeNanos, uint32_t* dumpedRecordCount,
+                      GetStartTimeFn getStartTime, GetEndTimeFn getEndTime) {
+        if (endTimeNanos <= startTimeNanos) {
+            return 10;
+        }
+        AutoSwitchBufferHandler handler(*this);
+        int64_t endTicket = std::min(handler.getMarkedTicket(), snapshotEndTicket);
+        uint32_t count = mMajorBuffer->availableCount(endTicket);
+        std::vector<T> records;
+        records.reserve(count);
+        uint64_t actualStart = std::numeric_limits<uint64_t>::max();
+        uint64_t actualEnd = 0;
+        T value;
+        bool expiredRecord = false;
+        for (int64_t ticket = endTicket - count; ticket < endTicket; ++ticket) {
+            if (!mMajorBuffer->readAt(ticket, &value)) {
+                expiredRecord = true;
+                continue;
+            }
+            uint64_t recordStart = getStartTime(value);
+            uint64_t recordEnd = getEndTime(value);
+            if (recordStart < endTimeNanos && recordEnd > startTimeNanos) {
+                records.push_back(value);
+                actualStart = std::min(actualStart, std::max(recordStart, startTimeNanos));
+                actualEnd = std::max(actualEnd, std::min(recordEnd, endTimeNanos));
+            }
+        }
+        if (records.empty()) {
+            return 11;
+        }
+        if (actualStartTimeNanos != nullptr) {
+            *actualStartTimeNanos = actualStart;
+        }
+        if (actualEndTimeNanos != nullptr) {
+            *actualEndTimeNanos = actualEnd;
+        }
+        if (dumpedRecordCount != nullptr) {
+            *dumpedRecordCount = static_cast<uint32_t>(records.size());
+        }
+        int result = innerDumpRecords(env, fd, mappingFd, type, version, time, extra, extraLen,
+                                      dumpRaw, dumper, records);
+        return result == 0 && expiredRecord ? 12 : result;
+    }
+
 private:
     RingBuffer<T>* getCurrentRingBuffer() {
-        if (__builtin_expect(mUseBackupBuffer, false)) {
+        if (__builtin_expect(mUseBackupBuffer.load(std::memory_order_acquire), false)) {
             return mBackupBuffer;
         } else {
             return mMajorBuffer;
@@ -249,13 +348,110 @@ private:
             ftruncate(fd, offset);
 
             if (dumper->hasMapping() && mappingFd != -1) {
-                dumper->dumpMapping(mappingFd);
+                if (!dumper->dumpMapping(mappingFd)) {
+                    return 13;
+                }
             }
 
             return 0;
         } else {
             return 9;
         }
+    }
+
+    void lockRoute() {
+        while (mRouteLock.test_and_set(std::memory_order_acquire)) {
+        }
+    }
+
+    void unlockRoute() {
+        mRouteLock.clear(std::memory_order_release);
+    }
+
+    int innerDumpRecords(JNIEnv* env, int fd, int mappingFd, uint32_t type, uint32_t version,
+                         uint64_t time, const char* extra, int32_t extraLen, bool dumpRaw,
+                         Dumper* dumper, const std::vector<T>& records) {
+        uint32_t count = static_cast<uint32_t>(records.size());
+        uint32_t magicNumber = 0x01020304;
+        if (dumpRaw) {
+            int64_t dumpSize = sizeof(magicNumber) + sizeof(type) + sizeof(version) + sizeof(time)
+                    + sizeof(count) + sizeof(extraLen) + extraLen + count * sizeof(T);
+            if (ftruncate(fd, dumpSize) != 0) {
+                return 3;
+            }
+            int64_t mmapSize = (dumpSize + ~PAGE_MASK) & PAGE_MASK;
+            void* addr = mmap(nullptr, mmapSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+            if (addr == MAP_FAILED) {
+                return errno;
+            }
+            char* writeAddr = static_cast<char*>(addr);
+            uint32_t offset = rheatrace::writeBuf(writeAddr, magicNumber);
+            offset += rheatrace::writeBuf(writeAddr + offset, type);
+            offset += rheatrace::writeBuf(writeAddr + offset, version);
+            offset += rheatrace::writeBuf(writeAddr + offset, time);
+            offset += rheatrace::writeBuf(writeAddr + offset, count);
+            offset += rheatrace::writeBuf(writeAddr + offset, extraLen > 0 ? extraLen : int32_t(0));
+            if (extraLen > 0 && extra != nullptr) {
+                memcpy(writeAddr + offset, extra, extraLen);
+                offset += extraLen;
+            }
+            memcpy(writeAddr + offset, records.data(), count * sizeof(T));
+            msync(addr, dumpSize, MS_SYNC);
+            munmap(addr, mmapSize);
+            return 0;
+        }
+        if (dumper == nullptr) {
+            return 9;
+        }
+        int64_t pageSize = sysconf(_SC_PAGE_SIZE);
+        int64_t mapUnit = std::max(int64_t(128 * 1024), pageSize);
+        int64_t mmapSize = mapUnit * 4;
+        if (ftruncate(fd, mmapSize) != 0) {
+            return 5;
+        }
+        void* addr = mmap(nullptr, mmapSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (addr == MAP_FAILED) {
+            return errno;
+        }
+        char* writeAddr = static_cast<char*>(addr);
+        uint32_t offset = rheatrace::writeBuf(writeAddr, magicNumber);
+        offset += rheatrace::writeBuf(writeAddr + offset, type);
+        offset += rheatrace::writeBuf(writeAddr + offset, version);
+        offset += rheatrace::writeBuf(writeAddr + offset, time);
+        offset += rheatrace::writeBuf(writeAddr + offset, count);
+        offset += rheatrace::writeBuf(writeAddr + offset, extraLen > 0 ? extraLen : int32_t(0));
+        if (extraLen > 0 && extra != nullptr) {
+            memcpy(writeAddr + offset, extra, extraLen);
+            offset += extraLen;
+        }
+        int64_t currentFileMmapOffset = 0;
+        for (const T& record : records) {
+            if (mmapSize + currentFileMmapOffset - offset < mapUnit) {
+                msync(addr, mmapSize, MS_SYNC);
+                munmap(addr, mmapSize);
+                currentFileMmapOffset += mmapSize - mapUnit;
+                if (ftruncate(fd, currentFileMmapOffset + mmapSize) != 0) {
+                    return 7;
+                }
+                addr = mmap(nullptr, mmapSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+                            currentFileMmapOffset);
+                if (addr == MAP_FAILED) {
+                    return 8;
+                }
+            }
+            T copy = record;
+            offset += dumper->dumpRecord(env,
+                    static_cast<char*>(addr) + offset - currentFileMmapOffset, &copy);
+        }
+        msync(addr, mmapSize, MS_SYNC);
+        munmap(addr, mmapSize);
+        ftruncate(fd, offset);
+        if (dumper->hasMapping() && mappingFd != -1) {
+            if (!dumper->dumpMapping(mappingFd)) {
+                return 13;
+            }
+        }
+        return 0;
     }
 };
 

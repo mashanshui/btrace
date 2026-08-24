@@ -17,6 +17,9 @@ android {
             abiFilters "arm64-v8a", "armeabi-v7a"
         }
         signingConfig signingConfigs.debug
+
+        boolean onlineTraceTest = project.findProperty('online_trace_test')?.toString() == 'true'
+        buildConfigField 'boolean', 'ONLINE_TRACE_TEST', onlineTraceTest.toString()
     }
 
 //    packagingOptions {
@@ -57,5 +60,75 @@ dependencies {
         implementation  project(':rhea-inhouse')
     } else {
         implementation project(':rhea-inhouse-noop')
+    }
+}
+
+// 运行线上采集端到端测试并把设备产物交给 rhea-trace-processor。
+// 用法：.\gradlew.bat -Ponline_trace_test=true :app:parseOnlineStackFlow
+def onlineStackFlowDir = file("${buildDir}/online-stack-flow")
+def onlineStackInput = project.findProperty('onlineStackInput')
+        ? file(project.findProperty('onlineStackInput').toString())
+        : new File(onlineStackFlowDir, 'input')
+def processorJar = rootProject.file(
+        "rhea-tool/rhea-trace-processor/build/libs/rhea-trace-processor-${POM_VERSION_NAME}.jar")
+
+tasks.register('parseOnlineStackFlow') {
+    group = 'verification'
+    description = '运行 app 线上堆栈导出测试，并使用 Processor 生成 JSON、HTML 和 Perfetto。'
+    dependsOn(':app:connectedDebugAndroidTest', ':rhea-trace-processor:jar')
+
+    doLast {
+        if (project.findProperty('online_trace_test')?.toString() != 'true') {
+            throw new GradleException('请使用 -Ponline_trace_test=true 运行线上端到端测试')
+        }
+        onlineStackFlowDir.mkdirs()
+        File inputDir = onlineStackInput
+        if (inputDir.exists()) {
+            delete(inputDir)
+        }
+        if (!inputDir.exists()) {
+            inputDir.mkdirs()
+        }
+        ['range', 'all'].each { String kind ->
+            delete(new File(onlineStackFlowDir, kind))
+        }
+
+        String adb = System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('windows')
+                ? 'adb.exe' : 'adb'
+        List<String> adbPrefix = []
+        String serial = project.findProperty('device')?.toString()
+        if (serial != null && !serial.trim().isEmpty()) {
+            adbPrefix.addAll(['-s', serial.trim()])
+        }
+        String remoteDir = '/sdcard/Android/data/rhea.sample.android/files/' +
+                'rhea-online-stack-test'
+        ['range', 'all'].each { String kind ->
+            File local = new File(inputDir, "${kind}.rheatrace.zip")
+            exec {
+                commandLine(([adb] + adbPrefix + ['pull',
+                        "${remoteDir}/${kind}.rheatrace.zip", local.absolutePath]) as String[])
+            }
+            if (!local.isFile() || local.length() == 0) {
+                throw new GradleException("未拉取到 ${kind} 堆栈产物：${local}")
+            }
+        }
+
+        File jar = processorJar
+        if (!jar.isFile()) {
+            throw new GradleException("未找到 Processor JAR：${jar}")
+        }
+        ['range', 'all'].each { String kind ->
+            File input = new File(inputDir, "${kind}.rheatrace.zip")
+            File output = new File(onlineStackFlowDir, kind)
+            output.mkdirs()
+            exec {
+                commandLine 'java', '-jar', jar.absolutePath, 'analyze-stack',
+                        '--input', input.absolutePath,
+                        '--output', new File(output, 'report.json').absolutePath,
+                        '--html', new File(output, 'report.html').absolutePath,
+                        '--trace', new File(output, 'report.pb').absolutePath
+            }
+        }
+        logger.lifecycle("线上堆栈导出解析完成：${onlineStackFlowDir}")
     }
 }

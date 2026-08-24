@@ -24,6 +24,7 @@ import com.bytedance.rheatrace.core.Version;
 import com.bytedance.rheatrace.core.Workspace;
 import com.bytedance.rheatrace.lite.LiteCapture;
 import com.bytedance.rheatrace.perfetto.PerfettoCapture;
+import com.bytedance.rheatrace.stack.StackMain;
 
 import org.json.JSONObject;
 
@@ -43,6 +44,10 @@ public class Main {
 
     private static Arguments arg;
     public static void main(String[] args) throws Exception {
+        if (args.length > 0 && "analyze-stack".equals(args[0])) {
+            StackMain.main(Arrays.copyOfRange(args, 1, args.length));
+            return;
+        }
         if (args.length == 0 || Arrays.asList(args).contains("-v")) {
             System.out.println("Version: " + Version.NAME);
             System.out.println("  Usage: " + usage());

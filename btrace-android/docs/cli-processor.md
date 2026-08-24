@@ -4,6 +4,10 @@
 
 ## 正文
 
+### 线上堆栈解析
+
+`analyze-stack` 不连接设备，直接校验并解析 SDK 导出的 `.rheatrace.zip`，通过 `--output` 生成 JSON、通过 `--html` 生成默认聚合火焰图（可切换调用树和时间明细）、通过 `--trace` 可选生成 Perfetto PB。点采样只展示证据和样本数，耗时为 `--`；只有 duration Hook 进入精确耗时统计。完整命令见[线上堆栈缓冲与导出](online-stack.md)。
+
 ### 入口流程
 
 `Main.main` 的执行顺序是：

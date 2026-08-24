@@ -41,6 +41,9 @@ private:
     bool enableWakeup;
     bool enabledThreadNames;
     bool shadowPauseMode;
+    bool onlineMode = false;
+    bool mainThreadOnly = false;
+    bool enableJniHook = true;
 
     friend class SamplingCollector;
 };

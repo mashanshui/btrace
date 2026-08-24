@@ -33,6 +33,9 @@ public class SamplingConfig extends TraceConfig {
     private boolean enableWakeup; // 开启锁、park、wait 唤醒监控
     private boolean enableThreadNames; // 是否采集线程名称
     private boolean shadowPause;
+    private boolean onlineMode;
+    private boolean mainThreadOnly;
+    private boolean enableJniHook = true;
 
     public SamplingConfig(SamplingConfigCreator creator) {
         super(creator);
@@ -118,9 +121,29 @@ public class SamplingConfig extends TraceConfig {
         this.shadowPause = shadowPause;
     }
 
+    public boolean isOnlineMode() {
+        return onlineMode;
+    }
+
+    public void setOnlineMode(boolean onlineMode) {
+        this.onlineMode = onlineMode;
+    }
+
+    public boolean isMainThreadOnly() {
+        return mainThreadOnly;
+    }
+
+    public void setMainThreadOnly(boolean mainThreadOnly) {
+        this.mainThreadOnly = mainThreadOnly;
+    }
+
+    public void setEnableJniHook(boolean enableJniHook) {
+        this.enableJniHook = enableJniHook;
+    }
+
     @Override
     public long[] deflate() {
-        long[] results = new long[10];
+        long[] results = new long[13];
         results[0] = bufferSize;
         results[1] = mainThreadIntervalNs;
         results[2] = otherThreadIntervalNs;
@@ -130,7 +153,10 @@ public class SamplingConfig extends TraceConfig {
         results[6] = enableRusage ? 1 : 0;
         results[7] = enableWakeup ? 1 : 0;
         results[8] = enableThreadNames ? 1 : 0;
-        results[9] = shadowPause? 1 : 0;
+        results[9] = shadowPause ? 1 : 0;
+        results[10] = onlineMode ? 1 : 0;
+        results[11] = mainThreadOnly ? 1 : 0;
+        results[12] = enableJniHook ? 1 : 0;
         return results;
     }
 

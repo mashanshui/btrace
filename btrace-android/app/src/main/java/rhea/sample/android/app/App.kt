@@ -19,6 +19,7 @@ import android.app.Application
 import android.content.Context
 import android.util.Log
 import com.bytedance.rheatrace.RheaTrace3
+import rhea.sample.android.BuildConfig
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 
@@ -28,7 +29,21 @@ class App : Application() {
 
     override fun attachBaseContext(base: Context?) {
         super.attachBaseContext(base)
-        RheaTrace3.init(base)
+        if (BuildConfig.ONLINE_TRACE_TEST) {
+            val result = RheaTrace3.initOnline(
+                this,
+                RheaTrace3.OnlineTraceConfig.builder()
+                    .setBufferSizeBytes(1024 * 1024)
+                    .setMinSampleIntervalMs(5)
+                    .setDiskQuotaBytes(8L * 1024L * 1024L)
+                    .setMaxArtifactBytes(4L * 1024L * 1024L)
+                    .setMappingId("app-online-test")
+                    .build()
+            )
+            Log.i("RheaTrace", "online test init result: $result")
+        } else {
+            RheaTrace3.init(base)
+        }
         initSdks()
         latch.await()
     }

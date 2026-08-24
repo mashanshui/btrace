@@ -46,11 +46,13 @@ static jlong *configArray_ = nullptr;
 static bool enableObjectAlloc_ = false;
 static bool enableWakeup_ = false;
 static bool shadowPause_ = false;
+static bool enableJniHook_ = true;
 
 bool doInit(JNIEnv *);
 
 bool
-init(JNIEnv* env, jlongArray pArray, bool enableObjectAlloc, bool enableWakeup, bool shadowPause) {
+init(JNIEnv* env, jlongArray pArray, bool enableObjectAlloc, bool enableWakeup,
+     bool shadowPause, bool enableJniHook) {
 #ifndef __aarch64__
     return false;
 #endif
@@ -64,6 +66,7 @@ init(JNIEnv* env, jlongArray pArray, bool enableObjectAlloc, bool enableWakeup, 
     enableObjectAlloc_ = enableObjectAlloc;
     enableWakeup_ = enableWakeup;
     shadowPause_ = shadowPause;
+    enableJniHook_ = enableJniHook;
     auto len = env->GetArrayLength(pArray);
     configArray_ = static_cast<jlong*>(malloc(len * sizeof(jlong)));
     env->GetLongArrayRegion(pArray, 0, len, configArray_);
@@ -80,7 +83,9 @@ bool doInit(JNIEnv* env) {
     }
     TraceBinderCall::init();
     TraceGC::init();
-    TraceJNICall::init();
+    if (enableJniHook_) {
+        TraceJNICall::init();
+    }
     TraceMessageIDChange::init(env);
     TraceJavaMonitor::init(enableWakeup_);
     TraceLoadLibrary::init();
@@ -99,7 +104,9 @@ bool doUnInit(JNIEnv *env) {
     }
     TraceBinderCall::destroy();
     TraceGC::destroy();
-    TraceJNICall::destroy();
+    if (enableJniHook_) {
+        TraceJNICall::destroy();
+    }
     TraceMessageIDChange::destroy();
     TraceJavaMonitor::destroy();
     TraceLoadLibrary::destroy();

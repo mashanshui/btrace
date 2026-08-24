@@ -10,8 +10,9 @@ SDK 使用者推荐按以下顺序阅读：
 
 1. [快速开始](getting-started.md)
 2. [配置参考](configuration-reference.md)
-3. [排障指南](troubleshooting.md)
-4. [术语表](glossary.md)
+3. [线上堆栈缓冲与导出](online-stack.md)
+4. [排障指南](troubleshooting.md)
+5. [术语表](glossary.md)
 
 项目贡献者推荐按以下顺序阅读：
 
@@ -34,6 +35,7 @@ SDK 使用者推荐按以下顺序阅读：
 | [CLI 处理器](cli-processor.md) | 参数、ADB、系统 Trace、解码和合并如何串联？ | 已按当前源码核对 |
 | [协议与数据格式](protocol-and-data-formats.md) | HTTP action、采样文件和 mapping 文件如何约定？ | 已按当前源码核对 |
 | [配置参考](configuration-reference.md) | 构建开关、系统属性和 CLI 参数分别控制什么？ | 已按当前源码核对 |
+| [线上堆栈缓冲与导出](online-stack.md) | 如何常驻缓冲、按时间/全量导出并生成树形报告？ | 已按当前源码核对 |
 | [源码参考](source-reference.md) | 每个手写 Java 类和 Native 组件负责什么？ | 已按当前源码核对 |
 | [开发与发布](development-and-release.md) | 如何构建、测试、调试、发布和维护文档？ | 已按当前源码核对 |
 | [排障指南](troubleshooting.md) | 不同阶段失败时如何定位？ | 已按当前源码核对 |

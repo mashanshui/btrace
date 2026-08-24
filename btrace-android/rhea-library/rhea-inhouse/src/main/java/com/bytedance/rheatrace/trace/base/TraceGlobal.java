@@ -29,10 +29,12 @@ public class TraceGlobal {
     static {
         try {
             System.loadLibrary("rheatrace");
-            nativeInit(Looper.getMainLooper().getThread());
+            if (!nativeInit(Looper.getMainLooper().getThread())) {
+                throw new IllegalStateException("native dependency init failed");
+            }
             JNIHook.init();
             success = true;
-        } catch (Exception e) {
+        } catch (LinkageError | RuntimeException e) {
             Log.e(TAG, "rhea-trace init failed: ", e);
             success = false;
         }
@@ -42,7 +44,7 @@ public class TraceGlobal {
         return success;
     }
 
-    private static native void nativeInit(Thread mainThread);
+    private static native boolean nativeInit(Thread mainThread);
 
     public static void capture(boolean force) {
         if (success) {
@@ -50,5 +52,14 @@ public class TraceGlobal {
         }
     }
 
+    /** 切换在线采集开关；仅影响在线模式，调试模式保持原有行为。 */
+    public static void setOnlineEnabled(boolean enabled) {
+        if (success) {
+            nativeSetOnlineEnabled(enabled);
+        }
+    }
+
     private static native void nativeCapture(boolean force);
+
+    private static native void nativeSetOnlineEnabled(boolean enabled);
 }
