@@ -18,6 +18,8 @@ package rhea.sample.android.app;
 import android.content.Context;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 
@@ -57,5 +59,11 @@ public class ThreadTest {
             System.out.println("done");
             LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(3));
         }
+    }
+
+    public int sdtdsf(int i) {
+        List<String> s = new ArrayList<>();
+        s.add(String.valueOf(i));
+        return (Integer.parseInt(s.get(0)) + 10) / 5;
     }
 }

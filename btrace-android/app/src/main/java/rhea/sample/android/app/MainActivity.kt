@@ -16,22 +16,51 @@
 package rhea.sample.android.app
 
 import android.os.Bundle
+import android.os.SystemClock
+import android.util.Log
 import android.view.Menu
 import android.view.MenuItem
 import androidx.appcompat.app.AppCompatActivity
+import com.bytedance.rheatrace.RheaTrace3
+import com.bytedance.rheatrace.RheaTrace3.exportStackData
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.google.android.material.snackbar.Snackbar
 import rhea.sample.android.R
 
+private const val TAG = "MainActivity"
 class MainActivity : AppCompatActivity() {
-
+    private var messageStartNs: Long = 0
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Tasks.doTasks()
         setContentView(R.layout.activity_main)
         setSupportActionBar(findViewById(R.id.toolbar))
+        LooperMonitor.sMainMonitor.register(object : LooperMonitor.LooperListener {
+            override fun onMessageBegin(log: String) {
+                messageStartNs = SystemClock.elapsedRealtimeNanos()
+            }
 
+            override fun onMessageEnd(log: String) {
+                val endNs = SystemClock.elapsedRealtimeNanos()
+                if (endNs > messageStartNs + 100000000) {
+                    Log.e(TAG, "onMessageEnd: ")
+                    val exportStackData =
+                        RheaTrace3.exportStackData(messageStartNs, endNs, RheaTrace3.ExportCallback { result: RheaTrace3.ExportResult? ->
+                            Log.e(TAG, "onMessageEnd: " + result?.artifact?.path)
+                        })
+                    Log.e(TAG, "onMessageEnd: "+exportStackData.name)
+                }
+            }
+        })
         findViewById<FloatingActionButton>(R.id.fab).setOnClickListener { view ->
+            var i = 0
+            view.post {
+                Log.e(TAG, "onCreate: 1")
+                repeat(400000) {
+                    i = ThreadTest().sdtdsf(i)
+                }
+                Log.e(TAG, "onCreate: 2")
+            }
             Snackbar.make(view, "Replace with your own action", Snackbar.LENGTH_LONG)
                 .setAction("Action", null).show()
         }

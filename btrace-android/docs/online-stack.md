@@ -79,9 +79,11 @@ java -jar rhea-trace-processor.jar analyze-stack `
   --trace report.pb
 ~~~
 
-report.json 同时包含按时间排列的 segments 和按公共前缀合并的 callTree。report.html 默认展示不依赖网络资源的聚合火焰图：相同公共前缀只出现一个方法块，纵向表示调用深度，横向默认按样本数统一计算，避免把纳秒耗时和样本数混为同一尺度；也可切换为“精确区间”指标，此时只有 duration Hook 节点参与宽度计算。页面还可切换到聚合调用树和时间堆栈明细。
+report.json 同时包含按时间排列的 segments 和按公共前缀合并的 callTree。report.html 默认展示不依赖网络资源的“聚合火焰图 + 估算耗时”：相同公共前缀只出现一个方法块，纵向表示调用深度，横向使用估算区间并集。页面可切换样本数、精确区间、PB 式采样时间轴、聚合调用树和时间堆栈明细；火焰图与时间轴支持按钮或 Ctrl+滚轮缩放、拖动平移，极小分支保持至少 2 px 的可见宽度。调用树分别列出估算总耗时、估算自耗时和精确区间，其中估算自耗时仅表示没有归属到直接子节点的估算区间。
 
-只有带真实开始和结束时间的 duration Hook 才显示耗时。普通点采样只增加样本数，耗时显示为 --，不能把样本数乘采样周期解释为连续执行时间。当前热路径没有记录 Dex PC；只有 mapping 或符号本身能够可靠提供位置时才显示文件和行号，否则显示 Unknown Source。
+点采样估算规则固定为：从当前点延伸到下一条同线程记录，最多不超过 `2 × minSampleIntervalNs`；最后一点按一个采样间隔计算，所有区间裁剪到导出窗口。旧产物没有采样间隔时回退为 10 ms。时间轴按真实时间横向放置 root → leaf 调用层级，把相邻或重叠记录中路径相同的公共前缀合并成连续 slice；路径变化时只结束发生变化的分支，超过估算上限的空洞保持为空。尺下短刻度表示真实采样时刻，虚线块表示估算跨度，实线块才表示 duration Hook 的真实区间；两类证据不会相互合并。`estimatedDurationNs` 和 `estimatedSelfDurationNs` 只能用于采样归因，不能解释为精确方法耗时或 CPU 自耗时。
+
+只有带真实开始和结束时间的 duration Hook 才进入 `exactDurationNs`。普通点采样的精确耗时仍显示为 `--`；页面新增的估算耗时始终明确标记为“估算”，不会覆盖精确字段。当前热路径没有记录 Dex PC；只有 mapping 或符号本身能够可靠提供位置时才显示文件和行号，否则显示 Unknown Source。
 
 ### app 模块端到端测试
 
@@ -107,7 +109,7 @@ report.json 同时包含按时间排列的 segments 和按公共前缀合并的 
 
 1. 记录一次 Hook 区间和一次手工点采样，分别执行范围导出和全量导出。
 2. 核对 manifest 的请求、可用、实际范围以及 PARTIAL 语义。
-3. 使用 analyze-stack 同时生成 JSON、HTML 和可选 PB，确认点采样耗时为 --。
+3. 使用 analyze-stack 同时生成 JSON、HTML 和可选 PB，确认点采样精确耗时为 --、估算字段有明确来源，并验证时间轴、缩放和平移。
 4. 执行 `:rhea-inhouse:assembleDebug`、`:rhea-inhouse-noop:assembleDebug` 和 `:rhea-trace-processor:test`。
 5. 在已连接的 API 26+ 64 位设备执行 `:app:parseOnlineStackFlow`，确认 RANGE/ALL 两条链路均生成 JSON、HTML 和 PB。
 6. 在目标设备记录 API、ABI、CPU、PSS 和主线程 P95/P99；源码构建成功不能替代 ART 私有符号兼容性验证。

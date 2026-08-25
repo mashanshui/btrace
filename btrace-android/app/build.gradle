@@ -19,7 +19,7 @@ android {
         signingConfig signingConfigs.debug
 
         boolean onlineTraceTest = project.findProperty('online_trace_test')?.toString() == 'true'
-        buildConfigField 'boolean', 'ONLINE_TRACE_TEST', onlineTraceTest.toString()
+        buildConfigField 'boolean', 'ONLINE_TRACE_TEST', 'true'
     }
 
 //    packagingOptions {

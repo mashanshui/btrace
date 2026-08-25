@@ -29,6 +29,9 @@ import java.util.regex.Pattern;
 /** 将通用线上堆栈产物解析为时间段列表和前缀合并调用树。 */
 public final class StackAnalyzer {
 
+    private static final long DEFAULT_SAMPLE_INTERVAL_NS = 10_000_000L;
+    private static final int ESTIMATE_CAP_MULTIPLIER = 2;
+
     private static final Pattern SOURCE_POSITION = Pattern.compile(
             ".*\\(([^():]+\\.(?:java|kt)):(\\d+)\\)$");
 
@@ -47,16 +50,28 @@ public final class StackAnalyzer {
         final Long end;
         final int type;
         final List<String> frames;
+        long estimatedEnd;
+        String durationKind;
+        String estimateSource;
 
         Segment(long start, Long end, int type, List<String> frames) {
             this.start = start;
             this.end = end;
             this.type = type;
             this.frames = frames;
+            if (exact()) {
+                estimatedEnd = end;
+                durationKind = "EXACT";
+                estimateSource = "EXACT";
+            }
         }
 
         boolean exact() {
             return end != null && end > start;
+        }
+
+        long estimatedDuration() {
+            return Math.max(0, estimatedEnd - start);
         }
     }
 
@@ -64,6 +79,7 @@ public final class StackAnalyzer {
         final String method;
         final Map<String, TreeNode> children = new LinkedHashMap<>();
         final List<Interval> exactIntervals = new ArrayList<>();
+        final List<Interval> estimatedIntervals = new ArrayList<>();
         final Set<String> eventTypes = new LinkedHashSet<>();
         int sampleCount;
 
@@ -76,6 +92,9 @@ public final class StackAnalyzer {
             eventTypes.add(CallNode.getType(segment.type));
             if (segment.exact()) {
                 exactIntervals.add(new Interval(segment.start, segment.end));
+            }
+            if (segment.estimatedEnd > segment.start) {
+                estimatedIntervals.add(new Interval(segment.start, segment.estimatedEnd));
             }
             if (index + 1 < frames.size()) {
                 String childName = frames.get(index + 1);
@@ -105,13 +124,22 @@ public final class StackAnalyzer {
                 return;
             }
             segments.add(segment);
-            String rootName = segment.frames.get(0);
-            TreeNode root = roots.get(rootName);
-            if (root == null) {
-                root = new TreeNode(rootName);
-                roots.put(rootName, root);
+        }
+
+        void buildTree() {
+            roots.clear();
+            for (Segment segment : segments) {
+                if (segment.frames.isEmpty()) {
+                    continue;
+                }
+                String rootName = segment.frames.get(0);
+                TreeNode root = roots.get(rootName);
+                if (root == null) {
+                    root = new TreeNode(rootName);
+                    roots.put(rootName, root);
+                }
+                root.add(segment.frames, 0, segment);
             }
-            root.add(segment.frames, 0, segment);
         }
     }
 
@@ -145,6 +173,12 @@ public final class StackAnalyzer {
                                    StackAnalysisRequest request) throws JSONException {
         long windowStart = manifest.getLong("actualStartNs");
         long windowEnd = manifest.getLong("actualEndNs");
+        long configuredInterval = manifest.optLong("minSampleIntervalNs", 0);
+        boolean intervalFromManifest = configuredInterval > 0;
+        long nominalInterval = intervalFromManifest
+                ? configuredInterval : DEFAULT_SAMPLE_INTERVAL_NS;
+        long maxPointDuration = nominalInterval > Long.MAX_VALUE / ESTIMATE_CAP_MULTIPLIER
+                ? Long.MAX_VALUE : nominalInterval * ESTIMATE_CAP_MULTIPLIER;
         int processId = decoded.getExtra().optInt(
                 "processId", manifest.optInt("processId", 0));
 
@@ -207,8 +241,17 @@ public final class StackAnalyzer {
 
         JSONArray threadJson = new JSONArray();
         int[] ids = {1};
+        List<Interval> allEstimated = new ArrayList<>();
         for (ThreadData thread : threads) {
             thread.segments.sort(Comparator.comparingLong(segment -> segment.start));
+            estimatePointDurations(thread.segments, windowEnd,
+                    nominalInterval, maxPointDuration);
+            thread.buildTree();
+            for (Segment segment : thread.segments) {
+                if (segment.estimatedEnd > segment.start) {
+                    allEstimated.add(new Interval(segment.start, segment.estimatedEnd));
+                }
+            }
             threadJson.put(threadToJson(thread, windowStart, ids));
         }
 
@@ -245,6 +288,15 @@ public final class StackAnalyzer {
         report.put("pointSampleCount", pointCount);
         report.put("exactRecordCount", exactCount);
         report.put("exactCoveredDurationNs", mergeDuration(allExact));
+        report.put("estimatedCoveredDurationNs", mergeDuration(allEstimated));
+        report.put("estimationPolicy", new JSONObject()
+                .put("pointPolicy", "UNTIL_NEXT_SAMPLE_CAPPED")
+                .put("nominalIntervalNs", nominalInterval)
+                .put("nominalIntervalSource",
+                        intervalFromManifest ? "MANIFEST" : "DEFAULT_10_MS")
+                .put("maxPointDurationNs", maxPointDuration)
+                .put("maxIntervalMultiplier", ESTIMATE_CAP_MULTIPLIER)
+                .put("lastPointDurationNs", nominalInterval));
         report.put("overwrittenRecordCount",
                 manifest.optLong("overwrittenRecordCount", 0));
         report.put("droppedByRateLimit", manifest.optLong("droppedByRateLimit", 0));
@@ -256,7 +308,7 @@ public final class StackAnalyzer {
         report.put("renderDefaults", new JSONObject()
                 .put("thread", request.getThread())
                 .put("sort", request.getSort())
-                .put("flameMetric", "samples")
+                .put("flameMetric", "estimated")
                 .put("view", "flame"));
         report.put("threads", threadJson);
         report.put("warnings", warnings);
@@ -274,6 +326,10 @@ public final class StackAnalyzer {
                     ? JSONObject.NULL : segment.end - windowStart);
             item.put("exactDurationNs", segment.exact()
                     ? segment.end - segment.start : JSONObject.NULL);
+            item.put("estimatedEndOffsetNs", segment.estimatedEnd - windowStart);
+            item.put("estimatedDurationNs", segment.estimatedDuration());
+            item.put("durationKind", segment.durationKind);
+            item.put("estimateSource", segment.estimateSource);
             item.put("sampleCount", 1);
             item.put("eventType", CallNode.getType(segment.type));
             JSONArray stack = new JSONArray();
@@ -292,25 +348,33 @@ public final class StackAnalyzer {
                 .put("tid", thread.tid)
                 .put("threadName", thread.name)
                 .put("sampleCount", thread.segments.size())
+                .put("estimatedCoveredDurationNs", estimatedCoveredDuration(thread.segments))
                 .put("segments", segments)
                 .put("callTree", roots);
     }
 
     private static JSONObject treeToJson(TreeNode node, int[] ids) throws JSONException {
         JSONArray children = new JSONArray();
-        List<Interval> childIntervals = new ArrayList<>();
+        List<Interval> childExactIntervals = new ArrayList<>();
+        List<Interval> childEstimatedIntervals = new ArrayList<>();
         for (TreeNode child : node.children.values()) {
             children.put(treeToJson(child, ids));
-            childIntervals.addAll(child.exactIntervals);
+            childExactIntervals.addAll(child.exactIntervals);
+            childEstimatedIntervals.addAll(child.estimatedIntervals);
         }
         long duration = mergeDuration(node.exactIntervals);
-        long selfDuration = Math.max(0, duration - mergeDuration(childIntervals));
+        long selfDuration = Math.max(0, duration - mergeDuration(childExactIntervals));
+        long estimatedDuration = mergeDuration(node.estimatedIntervals);
+        long estimatedSelfDuration = Math.max(0,
+                estimatedDuration - mergeDuration(childEstimatedIntervals));
         JSONObject json = frameToJson(node.method, ids);
         json.put("sampleCount", node.sampleCount);
         json.put("exactDurationNs", node.exactIntervals.isEmpty()
                 ? JSONObject.NULL : duration);
         json.put("selfDurationNs", node.exactIntervals.isEmpty()
                 ? JSONObject.NULL : selfDuration);
+        json.put("estimatedDurationNs", estimatedDuration);
+        json.put("estimatedSelfDurationNs", estimatedSelfDuration);
         JSONArray types = new JSONArray();
         for (String type : node.eventTypes) {
             types.put(type);
@@ -318,6 +382,58 @@ public final class StackAnalyzer {
         json.put("eventTypes", types);
         json.put("children", children);
         return json;
+    }
+
+    private static void estimatePointDurations(List<Segment> segments, long windowEnd,
+                                               long nominalInterval,
+                                               long maxPointDuration) {
+        for (int i = 0; i < segments.size(); i++) {
+            Segment segment = segments.get(i);
+            if (segment.exact()) {
+                continue;
+            }
+            long nextStart = Long.MAX_VALUE;
+            for (int j = i + 1; j < segments.size(); j++) {
+                long candidate = segments.get(j).start;
+                if (candidate > segment.start) {
+                    nextStart = candidate;
+                    break;
+                }
+            }
+            long estimatedEnd;
+            if (nextStart != Long.MAX_VALUE) {
+                long cappedEnd = saturatedAdd(segment.start, maxPointDuration);
+                if (nextStart <= cappedEnd) {
+                    estimatedEnd = nextStart;
+                    segment.estimateSource = "NEXT_SAMPLE";
+                } else {
+                    estimatedEnd = cappedEnd;
+                    segment.estimateSource = "CAPPED";
+                }
+            } else {
+                estimatedEnd = saturatedAdd(segment.start, nominalInterval);
+                segment.estimateSource = "LAST_SAMPLE";
+            }
+            segment.estimatedEnd = Math.min(windowEnd, estimatedEnd);
+            segment.durationKind = "ESTIMATED";
+        }
+    }
+
+    private static long estimatedCoveredDuration(List<Segment> segments) {
+        List<Interval> intervals = new ArrayList<>();
+        for (Segment segment : segments) {
+            if (segment.estimatedEnd > segment.start) {
+                intervals.add(new Interval(segment.start, segment.estimatedEnd));
+            }
+        }
+        return mergeDuration(intervals);
+    }
+
+    private static long saturatedAdd(long value, long delta) {
+        if (delta > 0 && value > Long.MAX_VALUE - delta) {
+            return Long.MAX_VALUE;
+        }
+        return value + delta;
     }
 
     private static JSONObject frameToJson(String symbol, int[] ids) throws JSONException {

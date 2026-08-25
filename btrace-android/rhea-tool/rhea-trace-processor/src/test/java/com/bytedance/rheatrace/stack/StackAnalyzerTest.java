@@ -56,6 +56,89 @@ public class StackAnalyzerTest {
             JSONObject root = method(thread.getJSONArray("callTree"), "void app.A.run()");
             Assert.assertEquals(2, root.getInt("sampleCount"));
             Assert.assertTrue(root.isNull("exactDurationNs"));
+            Assert.assertTrue(root.getLong("estimatedDurationNs") > 0);
+        } finally {
+            Assert.assertTrue(artifact.delete());
+        }
+    }
+
+    @Test
+    public void pointEstimationUsesNextSampleCapAndClippedLastSample() throws Exception {
+        long ms = 1_000_000L;
+        List<Record> records = Arrays.asList(
+                Record.point(100 * ms, 1000, "A", "B"),
+                Record.point(104 * ms, 1000, "A", "B"),
+                Record.point(130 * ms, 1000, "A", "C"),
+                Record.point(158 * ms, 1000, "A", "C"));
+        File artifact = createArtifact(1000, 100 * ms, 160 * ms, records,
+                mapOf("A", 1L, "B", 2L, "C", 3L), 5 * ms);
+        try {
+            JSONObject report = new StackAnalyzer().analyze(artifact, null).getReport();
+            JSONObject policy = report.getJSONObject("estimationPolicy");
+            Assert.assertEquals("MANIFEST", policy.getString("nominalIntervalSource"));
+            Assert.assertEquals(10 * ms, policy.getLong("maxPointDurationNs"));
+            JSONArray segments = report.getJSONArray("threads").getJSONObject(0)
+                    .getJSONArray("segments");
+            Assert.assertEquals(4 * ms,
+                    segments.getJSONObject(0).getLong("estimatedDurationNs"));
+            Assert.assertEquals("NEXT_SAMPLE",
+                    segments.getJSONObject(0).getString("estimateSource"));
+            Assert.assertEquals(10 * ms,
+                    segments.getJSONObject(1).getLong("estimatedDurationNs"));
+            Assert.assertEquals("CAPPED",
+                    segments.getJSONObject(1).getString("estimateSource"));
+            Assert.assertEquals(10 * ms,
+                    segments.getJSONObject(2).getLong("estimatedDurationNs"));
+            Assert.assertEquals(2 * ms,
+                    segments.getJSONObject(3).getLong("estimatedDurationNs"));
+            Assert.assertEquals("LAST_SAMPLE",
+                    segments.getJSONObject(3).getString("estimateSource"));
+            Assert.assertEquals("ESTIMATED",
+                    segments.getJSONObject(3).getString("durationKind"));
+            JSONObject root = method(report.getJSONArray("threads").getJSONObject(0)
+                    .getJSONArray("callTree"), "A");
+            Assert.assertEquals(26 * ms, root.getLong("estimatedDurationNs"));
+            Assert.assertEquals(0, root.getLong("estimatedSelfDurationNs"));
+        } finally {
+            Assert.assertTrue(artifact.delete());
+        }
+    }
+
+    @Test
+    public void estimationDoesNotUseAnotherThreadsNextSample() throws Exception {
+        long ms = 1_000_000L;
+        List<Record> records = Arrays.asList(
+                Record.point(100 * ms, 1000, "main.A"),
+                Record.point(105 * ms, 2000, "worker.B"),
+                Record.point(110 * ms, 2000, "worker.C"),
+                Record.point(140 * ms, 1000, "main.D"));
+        File artifact = createArtifact(1000, 100 * ms, 160 * ms, records,
+                mapOf("main.A", 1L, "worker.B", 2L, "worker.C", 3L,
+                        "main.D", 4L), 5 * ms);
+        try {
+            JSONObject report = new StackAnalyzer().analyze(artifact, null).getReport();
+            JSONObject main = thread(report.getJSONArray("threads"), 1000);
+            JSONObject first = main.getJSONArray("segments").getJSONObject(0);
+            Assert.assertEquals(10 * ms, first.getLong("estimatedDurationNs"));
+            Assert.assertEquals("CAPPED", first.getString("estimateSource"));
+        } finally {
+            Assert.assertTrue(artifact.delete());
+        }
+    }
+
+    @Test
+    public void missingSampleIntervalFallsBackToTenMilliseconds() throws Exception {
+        long ms = 1_000_000L;
+        File artifact = createArtifact(1000, 100 * ms, 150 * ms,
+                Arrays.asList(Record.point(120 * ms, 1000, "A")),
+                mapOf("A", 1L));
+        try {
+            JSONObject report = new StackAnalyzer().analyze(artifact, null).getReport();
+            Assert.assertEquals("DEFAULT_10_MS", report.getJSONObject("estimationPolicy")
+                    .getString("nominalIntervalSource"));
+            JSONObject segment = report.getJSONArray("threads").getJSONObject(0)
+                    .getJSONArray("segments").getJSONObject(0);
+            Assert.assertEquals(10 * ms, segment.getLong("estimatedDurationNs"));
         } finally {
             Assert.assertTrue(artifact.delete());
         }
@@ -74,6 +157,10 @@ public class StackAnalyzerTest {
             Assert.assertEquals(1, report.getInt("pointSampleCount"));
             Assert.assertEquals(150L, report.getLong("exactCoveredDurationNs"));
             JSONObject thread = report.getJSONArray("threads").getJSONObject(0);
+            JSONObject exact = thread.getJSONArray("segments").getJSONObject(0);
+            Assert.assertEquals("EXACT", exact.getString("durationKind"));
+            Assert.assertEquals("EXACT", exact.getString("estimateSource"));
+            Assert.assertEquals(150L, exact.getLong("estimatedDurationNs"));
             JSONObject a = method(thread.getJSONArray("callTree"), "A");
             Assert.assertEquals(150L, a.getLong("exactDurationNs"));
             Assert.assertEquals(0L, a.getLong("selfDurationNs"));
@@ -94,16 +181,36 @@ public class StackAnalyzerTest {
             JSONObject report = new StackAnalyzer().analyze(artifact, null).getReport();
             Assert.assertEquals("flame", report.getJSONObject("renderDefaults")
                     .getString("view"));
-            Assert.assertEquals("samples", report.getJSONObject("renderDefaults")
+            Assert.assertEquals("estimated", report.getJSONObject("renderDefaults")
                     .getString("flameMetric"));
             new StackHtmlRenderer().write(report, html);
             String text = new String(java.nio.file.Files.readAllBytes(html.toPath()),
                     StandardCharsets.UTF_8);
             Assert.assertTrue(text.contains("method"));
             Assert.assertTrue(text.contains("耗时 (ms)"));
+            Assert.assertTrue(text.contains("估算总耗时 (ms)"));
+            Assert.assertTrue(text.contains("估算自耗时 (ms)"));
+            Assert.assertTrue(text.contains("精确区间 (ms)"));
+            Assert.assertTrue(text.contains("未归属估算耗时"));
+            Assert.assertTrue(text.contains("不代表 CPU 自耗时"));
             Assert.assertTrue(text.contains("聚合火焰图"));
+            Assert.assertTrue(text.contains("采样时间轴"));
+            Assert.assertTrue(text.contains("宽度：估算耗时"));
             Assert.assertTrue(text.contains("宽度：样本数"));
-            Assert.assertTrue(text.contains("flame-cell"));
+            Assert.assertTrue(text.contains("timeline-axis"));
+            Assert.assertTrue(text.contains("function buildTimelineSlices"));
+            Assert.assertTrue(text.contains("start<=previous.end"));
+            Assert.assertTrue(text.contains("previous.lastOrder===order-1"));
+            Assert.assertTrue(text.contains("path.concat(identity)"));
+            Assert.assertTrue(text.contains("timeline-sample-tick"));
+            Assert.assertTrue(text.contains("公共调用前缀按真实时间连续合并"));
+            Assert.assertFalse(text.contains("timeline-marker"));
+            Assert.assertFalse(text.contains("SINGLE_SAMPLING_DURATION"));
+            Assert.assertTrue(text.contains("MIN_CELL_PX=2"));
+            Assert.assertTrue(text.contains("MAX_ZOOM=64"));
+            Assert.assertTrue(text.contains("function zoomAt"));
+            Assert.assertTrue(text.contains("pointerdown"));
+            Assert.assertTrue(text.contains("Ctrl+滚轮缩放"));
             Assert.assertTrue(text.contains("function flame"));
             Assert.assertTrue(text.contains("put(child,cx,childWidth,depth+1)"));
             Assert.assertTrue(text.contains("application/json"));
@@ -170,9 +277,26 @@ public class StackAnalyzerTest {
         return null;
     }
 
+    private static JSONObject thread(JSONArray threads, int tid) throws Exception {
+        for (int i = 0; i < threads.length(); i++) {
+            JSONObject item = threads.getJSONObject(i);
+            if (item.getInt("tid") == tid) {
+                return item;
+            }
+        }
+        Assert.fail("thread not found: " + tid);
+        return null;
+    }
+
     private static File createArtifact(int processId, long eventStart, long eventEnd,
                                        List<Record> records,
                                        Map<String, Long> mapping) throws Exception {
+        return createArtifact(processId, eventStart, eventEnd, records, mapping, null);
+    }
+
+    private static File createArtifact(int processId, long eventStart, long eventEnd,
+                                       List<Record> records, Map<String, Long> mapping,
+                                       Long minSampleIntervalNs) throws Exception {
         File artifact = File.createTempFile("rhea-stack-analysis", ".zip");
         byte[] sampling = encodeSampling(processId, records, mapping);
         byte[] mappingBytes = encodeMapping(mapping, 1000, "main");
@@ -195,6 +319,9 @@ public class StackAnalyzerTest {
                 .put("files", new JSONObject()
                         .put("sampling", fileInfo(sampling))
                         .put("sampling-mapping", fileInfo(mappingBytes)));
+        if (minSampleIntervalNs != null) {
+            manifest.put("minSampleIntervalNs", minSampleIntervalNs);
+        }
         try (ZipOutputStream zip = new ZipOutputStream(new FileOutputStream(artifact))) {
             put(zip, "manifest.json", manifest.toString().getBytes(StandardCharsets.UTF_8));
             put(zip, "sampling.bin", sampling);

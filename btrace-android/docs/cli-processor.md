@@ -6,7 +6,9 @@
 
 ### 线上堆栈解析
 
-`analyze-stack` 不连接设备，直接校验并解析 SDK 导出的 `.rheatrace.zip`，通过 `--output` 生成 JSON、通过 `--html` 生成默认聚合火焰图（可切换调用树和时间明细）、通过 `--trace` 可选生成 Perfetto PB。点采样只展示证据和样本数，耗时为 `--`；只有 duration Hook 进入精确耗时统计。完整命令见[线上堆栈缓冲与导出](online-stack.md)。
+`analyze-stack` 不连接设备，直接校验并解析 SDK 导出的 `.rheatrace.zip`，通过 `--output` 生成 JSON、通过 `--html` 生成默认按估算耗时展示的聚合火焰图、通过 `--trace` 可选生成 Perfetto PB。HTML 可切换样本数、估算耗时、精确区间、PB 式采样时间轴、调用树和时间明细；火焰图与时间轴支持 1～64 倍缩放和拖动平移。采样时间轴把相邻记录中未变化的公共调用前缀合并为连续横向 slice，仅在调用路径变化处形成子分支；时间空洞不会被强行连接。
+
+点采样本身仍没有精确耗时。Processor 只为展示生成估算区间：当前点延伸到下一条同线程记录，最多为 manifest 中 `minSampleIntervalNs` 的两倍，末尾点按一个采样间隔计算，并裁剪到导出窗口。旧产物缺少采样间隔时回退为 10 ms。JSON 使用 `durationKind`、`estimateSource`、`estimatedDurationNs` 与原有 `exactDurationNs` 区分估算和精确证据。聚合调用树同时显示估算总耗时、未归属估算耗时和精确区间；未归属估算耗时不是 CPU 自耗时。完整命令见[线上堆栈缓冲与导出](online-stack.md)。
 
 ### 入口流程
 
@@ -101,6 +103,7 @@ CLI 捕获顶层异常并打印 `TraceError.prompt`，当前不会重新抛出�
 2. 分别运行 `-mode perfetto` 与 `-mode simple`，检查工作目录和最终输出差异。
 3. 使用 `-r`、`-w`、普通模式各采集一次，观察 start 请求与端口转发建立时机。
 4. 构造非法 mapping、不可写输出目录和不存在包名，确认日志提示能够定位阶段。
+5. 使用同时包含点采样和 duration Hook 的产物生成 HTML，核对估算区间使用虚线、精确区间使用实线，并验证缩放不会改变 JSON 中的统计值。
 
 ## 相关文档
 

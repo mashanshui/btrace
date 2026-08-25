@@ -37,6 +37,7 @@ class App : Application() {
                     .setMinSampleIntervalMs(5)
                     .setDiskQuotaBytes(8L * 1024L * 1024L)
                     .setMaxArtifactBytes(4L * 1024L * 1024L)
+                    .setEnableObjectAllocation(true)
                     .setMappingId("app-online-test")
                     .build()
             )
