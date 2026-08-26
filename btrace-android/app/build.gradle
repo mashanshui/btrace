@@ -74,7 +74,7 @@ def processorJar = rootProject.file(
 
 tasks.register('parseOnlineStackFlow') {
     group = 'verification'
-    description = '运行 app 线上堆栈导出测试，并使用 Processor 生成 JSON、HTML 和 Perfetto。'
+    description = '运行 app 线上堆栈导出测试，并使用 Processor 生成完整 JSON、调用树 JSON、HTML 和 Perfetto。'
     dependsOn(':app:connectedDebugAndroidTest', ':rhea-trace-processor:jar')
 
     doLast {
@@ -125,6 +125,7 @@ tasks.register('parseOnlineStackFlow') {
                 commandLine 'java', '-jar', jar.absolutePath, 'analyze-stack',
                         '--input', input.absolutePath,
                         '--output', new File(output, 'report.json').absolutePath,
+                        '--call-tree-output', new File(output, 'report.call-tree.json').absolutePath,
                         '--html', new File(output, 'report.html').absolutePath,
                         '--trace', new File(output, 'report.pb').absolutePath
             }

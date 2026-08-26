@@ -120,6 +120,17 @@ public class SamplingTraceDecoder {
     public static DecodedSampling decodeDetailed(File sampling, File mapping,
                                                  String appName, File proguardMapping)
             throws IOException {
+        return decodeDetailed(sampling, mapping, appName, proguardMapping, true);
+    }
+
+    /**
+     * 解码在线 ZIP 解包后的采样文件，可按调用方需要跳过 Perfetto Trace 构建。
+     * 跳过 Trace 只影响返回的 Trace，不改变采样记录、mapping 和线程信息。
+     */
+    public static DecodedSampling decodeDetailed(File sampling, File mapping,
+                                                 String appName, File proguardMapping,
+                                                 boolean buildTrace)
+            throws IOException {
         SamplingMappingDecoder mappingDecoder = decodeMapping(mapping);
         if (proguardMapping != null) {
             ProguardMappingDecoder proguardMappingDecoder =
@@ -133,7 +144,7 @@ public class SamplingTraceDecoder {
         JSONObject extra = payload.extra;
         int actualPid = extra.optInt("processId", 0);
         pid = actualPid;
-        Trace trace = samplingTrace.isEmpty() ? null
+        Trace trace = !buildTrace || samplingTrace.isEmpty() ? null
                 : StackTraceConvertor.convert(actualPid, appName, samplingTrace, mappingDecoder.threadNames);
         return new DecodedSampling(trace, samplingTrace, extra, mappingDecoder.threadNames,
                 payload.version, payload.recordCount);

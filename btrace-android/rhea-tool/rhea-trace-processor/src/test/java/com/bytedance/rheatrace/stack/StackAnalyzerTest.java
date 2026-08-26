@@ -226,19 +226,116 @@ public class StackAnalyzerTest {
         File artifact = createArtifact(1000, 100, 300,
                 Arrays.asList(Record.point(150, 1000, "A")), mapOf("A", 1L));
         File json = File.createTempFile("rhea-stack-command", ".json");
+        File callTree = File.createTempFile("rhea-stack-command-tree", ".json");
         File html = File.createTempFile("rhea-stack-command", ".html");
         try {
             StackMain.main(new String[]{"--input", artifact.getAbsolutePath(),
                     "--output", json.getAbsolutePath(), "--html", html.getAbsolutePath(),
+                    "--call-tree-output", callTree.getAbsolutePath(),
                     "--thread", "main", "--sort", "duration"});
             Assert.assertEquals("RHEA_STACK_REPORT",
                     new JSONObject(new String(java.nio.file.Files.readAllBytes(json.toPath()),
+                            StandardCharsets.UTF_8)).getString("artifactType"));
+            Assert.assertEquals("RHEA_STACK_CALL_TREE",
+                    new JSONObject(new String(java.nio.file.Files.readAllBytes(callTree.toPath()),
                             StandardCharsets.UTF_8)).getString("artifactType"));
             Assert.assertTrue(html.length() > 0);
         } finally {
             Assert.assertTrue(artifact.delete());
             Assert.assertTrue(json.delete());
+            Assert.assertTrue(callTree.delete());
             Assert.assertTrue(html.delete());
+        }
+    }
+
+    @Test
+    public void callTreeJsonMatchesFullReportAndContainsAllThreads() throws Exception {
+        File artifact = createArtifact(1000, 100, 300,
+                Arrays.asList(
+                        Record.point(150, 1000, "A", "main.Child"),
+                        Record.point(160, 2000, "A", "worker.Child")),
+                mapOf("A", 1L, "main.Child", 2L, "worker.Child", 3L));
+        try {
+            StackAnalysisResult result = new StackAnalyzer().analyze(artifact, null);
+            JSONObject report = result.getReport();
+            String callTreeText = result.getCallTreeJson();
+            Assert.assertEquals(callTreeText,
+                    new StackAnalyzer().analyzeCallTree(artifact, null));
+            Assert.assertTrue(callTreeText.startsWith("{"));
+            Assert.assertTrue(callTreeText.contains("\n  \"schemaVersion\""));
+            JSONObject callTree = new JSONObject(callTreeText);
+            Assert.assertEquals("RHEA_STACK_CALL_TREE", callTree.getString("artifactType"));
+            Assert.assertFalse(callTree.has("renderDefaults"));
+            Assert.assertEquals(2, callTree.getJSONArray("threads").length());
+            for (int i = 0; i < report.getJSONArray("threads").length(); i++) {
+                JSONObject fullThread = report.getJSONArray("threads").getJSONObject(i);
+                JSONObject treeThread = thread(callTree.getJSONArray("threads"),
+                        fullThread.getInt("tid"));
+                Assert.assertFalse(treeThread.has("segments"));
+                Assert.assertEquals(fullThread.getJSONArray("callTree").toString(),
+                        treeThread.getJSONArray("callTree").toString());
+                assertEstimatedDurationFields(treeThread.getJSONArray("callTree"));
+            }
+        } finally {
+            Assert.assertTrue(artifact.delete());
+        }
+    }
+
+    @Test
+    public void standaloneCallTreeParserSkipsPerfettoAndReturnsFormattedJson() throws Exception {
+        File artifact = createArtifact(1000, 100, 300,
+                Arrays.asList(Record.point(150, 1000, "A")), mapOf("A", 1L));
+        try {
+            String text = new StackAnalyzer().analyzeCallTree(artifact, null);
+            JSONObject callTree = new JSONObject(text);
+            Assert.assertEquals("RHEA_STACK_CALL_TREE", callTree.getString("artifactType"));
+            Assert.assertEquals(1, callTree.getJSONArray("threads").length());
+            Assert.assertFalse(callTree.getJSONArray("threads").getJSONObject(0)
+                    .has("segments"));
+            assertEstimatedDurationFields(callTree.getJSONArray("threads")
+                    .getJSONObject(0).getJSONArray("callTree"));
+        } finally {
+            Assert.assertTrue(artifact.delete());
+        }
+    }
+
+    @Test
+    public void analyzeStackCommandUsesDefaultCallTreeFileName() throws Exception {
+        File artifact = createArtifact(1000, 100, 300,
+                Arrays.asList(Record.point(150, 1000, "A")), mapOf("A", 1L));
+        File json = File.createTempFile("rhea-stack-default", ".json");
+        File callTree = new File(json.getParentFile(),
+                json.getName().substring(0, json.getName().length() - 5)
+                        + ".call-tree.json");
+        try {
+            Assert.assertTrue(callTree.delete() || !callTree.exists());
+            StackMain.main(new String[]{"--input", artifact.getAbsolutePath(),
+                    "--output", json.getAbsolutePath()});
+            Assert.assertTrue(callTree.isFile());
+            Assert.assertEquals("RHEA_STACK_CALL_TREE",
+                    new JSONObject(new String(java.nio.file.Files.readAllBytes(callTree.toPath()),
+                            StandardCharsets.UTF_8)).getString("artifactType"));
+        } finally {
+            Assert.assertTrue(artifact.delete());
+            Assert.assertTrue(json.delete());
+            Assert.assertTrue(callTree.delete());
+        }
+    }
+
+    @Test
+    public void analyzeStackCommandRejectsOutputPathConflict() throws Exception {
+        File artifact = createArtifact(1000, 100, 300,
+                Arrays.asList(Record.point(150, 1000, "A")), mapOf("A", 1L));
+        try {
+            try {
+                StackMain.main(new String[]{"--input", artifact.getAbsolutePath(),
+                        "--output", artifact.getAbsolutePath()});
+                Assert.fail("input/output path conflict should be rejected");
+            } catch (java.io.IOException expected) {
+                Assert.assertTrue(expected.getMessage().contains("不能使用同一路径"));
+            }
+        } finally {
+            Assert.assertTrue(artifact.delete());
         }
     }
 
@@ -286,6 +383,15 @@ public class StackAnalyzerTest {
         }
         Assert.fail("thread not found: " + tid);
         return null;
+    }
+
+    private static void assertEstimatedDurationFields(JSONArray nodes) throws Exception {
+        for (int i = 0; i < nodes.length(); i++) {
+            JSONObject node = nodes.getJSONObject(i);
+            Assert.assertTrue(node.has("estimatedDurationNs"));
+            Assert.assertTrue(node.has("estimatedSelfDurationNs"));
+            assertEstimatedDurationFields(node.getJSONArray("children"));
+        }
     }
 
     private static File createArtifact(int processId, long eventStart, long eventEnd,

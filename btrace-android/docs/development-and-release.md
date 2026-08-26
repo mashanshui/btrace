@@ -22,7 +22,7 @@ Windows 优先使用 Gradle Wrapper：
 .\gradlew.bat --no-daemon -Ponline_trace_test=true -Pdevice=设备序列号 :app:parseOnlineStackFlow
 ```
 
-该任务会运行 `app` instrumentation 测试，拉取 RANGE/ALL 产物，再调用 `rhea-trace-processor analyze-stack` 生成 JSON、HTML 和 Perfetto PB。输出位于 `app/build/online-stack-flow/`，不应提交。
+该任务会运行 `app` instrumentation 测试，拉取 RANGE/ALL 产物，再调用 `rhea-trace-processor analyze-stack` 生成完整 JSON、聚合调用树 JSON、HTML 和 Perfetto PB。输出位于 `app/build/online-stack-flow/`，不应提交。
 
 构建真实库需要 `local.properties` 中的 Android SDK 路径和指定 NDK。`local.properties`、密钥、`build/`、`.cxx/` 及本机产物不得提交。
 

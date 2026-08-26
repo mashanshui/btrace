@@ -23,6 +23,7 @@ public final class StackMain {
     public static void main(String[] args) throws Exception {
         File input = null;
         File output = null;
+        File callTreeOutput = null;
         File html = null;
         File mapping = null;
         File traceOutput = null;
@@ -34,6 +35,8 @@ public final class StackMain {
                 input = new File(args[++i]);
             } else if ("--output".equals(arg) && i + 1 < args.length) {
                 output = new File(args[++i]);
+            } else if ("--call-tree-output".equals(arg) && i + 1 < args.length) {
+                callTreeOutput = new File(args[++i]);
             } else if ("--html".equals(arg) && i + 1 < args.length) {
                 html = new File(args[++i]);
             } else if ("--mapping".equals(arg) && i + 1 < args.length) {
@@ -46,7 +49,8 @@ public final class StackMain {
                 sort = args[++i];
             } else {
                 throw new IllegalArgumentException(
-                        "参数错误，支持 --input、--output、--html、--mapping、--trace、--thread、--sort");
+                        "参数错误，支持 --input、--output、--call-tree-output、--html、"
+                                + "--mapping、--trace、--thread、--sort");
             }
         }
         if (input == null) {
@@ -55,6 +59,10 @@ public final class StackMain {
         if (output == null) {
             output = sibling(input, input.getName() + ".json");
         }
+        if (callTreeOutput == null) {
+            callTreeOutput = defaultCallTreeOutput(output);
+        }
+        ensureDistinctOutputs(input, output, callTreeOutput, html, traceOutput);
         StackAnalysisRequest request = StackAnalysisRequest.builder(input)
                 .setProguardMapping(mapping)
                 .setThread(thread)
@@ -64,6 +72,9 @@ public final class StackMain {
         ensureParent(output);
         Files.write(output.toPath(),
                 result.getReport().toString(2).getBytes(StandardCharsets.UTF_8));
+        ensureParent(callTreeOutput);
+        Files.write(callTreeOutput.toPath(),
+                result.getCallTreeJson().getBytes(StandardCharsets.UTF_8));
         if (html != null) {
             new StackHtmlRenderer().write(result.getReport(), html);
         }
@@ -78,12 +89,42 @@ public final class StackMain {
             }
         }
         System.out.println("堆栈产物解析完成: " + output.getAbsolutePath()
+                + "；调用树 JSON: " + callTreeOutput.getAbsolutePath()
                 + (html == null ? "" : "；HTML: " + html.getAbsolutePath()));
     }
 
     private static File sibling(File input, String name) {
         File parent = input.getAbsoluteFile().getParentFile();
         return new File(parent == null ? new File(".") : parent, name);
+    }
+
+    private static File defaultCallTreeOutput(File output) {
+        String name = output.getName();
+        if (name.length() >= 5 && name.regionMatches(true,
+                name.length() - 5, ".json", 0, 5)) {
+            name = name.substring(0, name.length() - 5) + ".call-tree.json";
+        } else {
+            name += ".call-tree.json";
+        }
+        File parent = output.getAbsoluteFile().getParentFile();
+        return new File(parent == null ? new File(".") : parent, name);
+    }
+
+    private static void ensureDistinctOutputs(File input, File... outputs) throws IOException {
+        File[] all = new File[outputs.length + 1];
+        all[0] = input;
+        System.arraycopy(outputs, 0, all, 1, outputs.length);
+        for (int i = 0; i < all.length; i++) {
+            if (all[i] == null) {
+                continue;
+            }
+            for (int j = i + 1; j < all.length; j++) {
+                if (all[j] != null && all[i].getCanonicalFile().equals(all[j].getCanonicalFile())) {
+                    throw new IOException("输入文件和输出文件不能使用同一路径: "
+                            + all[i].getAbsolutePath());
+                }
+            }
+        }
     }
 
     private static void ensureParent(File file) throws IOException {

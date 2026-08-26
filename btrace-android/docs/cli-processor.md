@@ -6,9 +6,21 @@
 
 ### 线上堆栈解析
 
-`analyze-stack` 不连接设备，直接校验并解析 SDK 导出的 `.rheatrace.zip`，通过 `--output` 生成 JSON、通过 `--html` 生成默认按估算耗时展示的聚合火焰图、通过 `--trace` 可选生成 Perfetto PB。HTML 可切换样本数、估算耗时、精确区间、PB 式采样时间轴、调用树和时间明细；火焰图与时间轴支持 1～64 倍缩放和拖动平移。采样时间轴把相邻记录中未变化的公共调用前缀合并为连续横向 slice，仅在调用路径变化处形成子分支；时间空洞不会被强行连接。
+`analyze-stack` 不连接设备，直接校验并解析 SDK 导出的 `.rheatrace.zip`，通过 `--output` 生成完整 JSON、默认同时生成同目录的 `report.call-tree.json` 聚合调用树 JSON，通过 `--html` 生成默认按估算耗时展示的聚合火焰图、通过 `--trace` 可选生成 Perfetto PB。可通过 `--call-tree-output` 指定调用树 JSON 路径。HTML 可切换样本数、估算耗时、精确区间、PB 式采样时间轴、调用树和时间明细；火焰图与时间轴支持 1～64 倍缩放和拖动平移。采样时间轴把相邻记录中未变化的公共调用前缀合并为连续横向 slice，仅在调用路径变化处形成子分支；时间空洞不会被强行连接。
 
 点采样本身仍没有精确耗时。Processor 只为展示生成估算区间：当前点延伸到下一条同线程记录，最多为 manifest 中 `minSampleIntervalNs` 的两倍，末尾点按一个采样间隔计算，并裁剪到导出窗口。旧产物缺少采样间隔时回退为 10 ms。JSON 使用 `durationKind`、`estimateSource`、`estimatedDurationNs` 与原有 `exactDurationNs` 区分估算和精确证据。聚合调用树同时显示估算总耗时、未归属估算耗时和精确区间；未归属估算耗时不是 CPU 自耗时。完整命令见[线上堆栈缓冲与导出](online-stack.md)。
+
+### 独立调用树 JSON
+
+`report.call-tree.json` 的 `artifactType` 为 `RHEA_STACK_CALL_TREE`，只包含公共元数据、统计信息和 `threads[].callTree`，不包含完整报告中的 `segments`、`renderDefaults` 或 HTML 专用字段。所有线程分别聚合，同名方法不会跨线程合并。每个方法节点的 `estimatedDurationNs` 是估算区间并集后的估算总耗时，`estimatedSelfDurationNs` 是未归属到直接子节点的估算时间，不代表 CPU 自耗时；真实 duration Hook 仍通过 `exactDurationNs` 和 `selfDurationNs` 单独表达。
+
+除 CLI 外，服务端或其他 Java 调用方可以只生成调用树 JSON 字符串：
+
+~~~java
+String callTreeJson = new StackAnalyzer().analyzeCallTree(request);
+~~~
+
+`analyze-stack` 在一次采样解码中同时生成完整 JSON 和调用树 JSON；独立 API 会跳过 Perfetto Trace 构建，但仍执行相同的格式校验、mapping retrace、时间裁剪和估算规则。
 
 ### 入口流程
 

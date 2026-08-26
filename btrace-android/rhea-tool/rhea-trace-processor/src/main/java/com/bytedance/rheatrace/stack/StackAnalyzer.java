@@ -6,6 +6,7 @@
  */
 package com.bytedance.rheatrace.stack;
 
+import com.bytedance.rheatrace.perfetto.Trace;
 import com.bytedance.rheatrace.trace.CallNode;
 import com.bytedance.rheatrace.trace.SamplingTraceDecoder;
 import com.bytedance.rheatrace.trace.StackList;
@@ -143,23 +144,66 @@ public final class StackAnalyzer {
         }
     }
 
+    private static final class AnalysisData {
+        final JSONObject manifest;
+        final long windowStart;
+        final long windowEnd;
+        final int processId;
+        final int pointCount;
+        final int exactCount;
+        final List<Interval> allExact;
+        final List<Interval> allEstimated;
+        final List<ThreadData> threads;
+        final JSONArray warnings;
+        final JSONObject estimationPolicy;
+
+        AnalysisData(JSONObject manifest, long windowStart, long windowEnd,
+                     int processId,
+                     int pointCount, int exactCount, List<Interval> allExact,
+                     List<Interval> allEstimated, List<ThreadData> threads,
+                     JSONArray warnings, JSONObject estimationPolicy) {
+            this.manifest = manifest;
+            this.windowStart = windowStart;
+            this.windowEnd = windowEnd;
+            this.processId = processId;
+            this.pointCount = pointCount;
+            this.exactCount = exactCount;
+            this.allExact = allExact;
+            this.allEstimated = allEstimated;
+            this.threads = threads;
+            this.warnings = warnings;
+            this.estimationPolicy = estimationPolicy;
+        }
+    }
+
+    private static final class ParsedAnalysis {
+        final AnalysisData data;
+        final Trace trace;
+
+        ParsedAnalysis(AnalysisData data, Trace trace) {
+            this.data = data;
+            this.trace = trace;
+        }
+    }
+
     public StackAnalysisResult analyze(StackAnalysisRequest request) throws IOException {
-        try (StackArtifact artifact = StackArtifact.open(request.getInput())) {
-            JSONObject manifest = artifact.getManifest();
-            String appName = manifest.optString("appName", "online");
-            SamplingTraceDecoder.DecodedSampling decoded = SamplingTraceDecoder.decodeDetailed(
-                    artifact.getSamplingFile(), artifact.getMappingFile(), appName,
-                    request.getProguardMapping());
-            if (decoded.getFormatVersion() != manifest.getInt("samplingFormatVersion")) {
-                throw new IOException("manifest 与 sampling 格式版本不一致");
-            }
-            if (decoded.getRawRecordCount() != manifest.getInt("recordCount")) {
-                throw new IOException("manifest 与 sampling 记录数不一致");
-            }
-            return new StackAnalysisResult(
-                    buildReport(manifest, decoded, request), decoded.getTrace());
+        ParsedAnalysis parsed = parse(request, true);
+        try {
+            JSONObject report = buildReport(parsed.data, request);
+            String callTreeJson = buildCallTreeReport(parsed.data).toString(2);
+            return new StackAnalysisResult(report, callTreeJson, parsed.trace);
         } catch (JSONException e) {
             throw new IOException("生成堆栈报告失败", e);
+        }
+    }
+
+    /** 只解析并返回聚合调用树 JSON，不构建 Perfetto Trace。 */
+    public String analyzeCallTree(StackAnalysisRequest request) throws IOException {
+        ParsedAnalysis parsed = parse(request, false);
+        try {
+            return buildCallTreeReport(parsed.data).toString(2);
+        } catch (JSONException e) {
+            throw new IOException("生成聚合调用树 JSON 失败", e);
         }
     }
 
@@ -168,9 +212,35 @@ public final class StackAnalyzer {
                 .setProguardMapping(proguardMapping).build());
     }
 
-    private JSONObject buildReport(JSONObject manifest,
-                                   SamplingTraceDecoder.DecodedSampling decoded,
-                                   StackAnalysisRequest request) throws JSONException {
+    public String analyzeCallTree(File artifact, File proguardMapping) throws IOException {
+        return analyzeCallTree(StackAnalysisRequest.builder(artifact)
+                .setProguardMapping(proguardMapping).build());
+    }
+
+    private ParsedAnalysis parse(StackAnalysisRequest request, boolean buildTrace)
+            throws IOException {
+        try (StackArtifact artifact = StackArtifact.open(request.getInput())) {
+            JSONObject manifest = artifact.getManifest();
+            String appName = manifest.optString("appName", "online");
+            SamplingTraceDecoder.DecodedSampling decoded = SamplingTraceDecoder.decodeDetailed(
+                    artifact.getSamplingFile(), artifact.getMappingFile(), appName,
+                    request.getProguardMapping(), buildTrace);
+            if (decoded.getFormatVersion() != manifest.getInt("samplingFormatVersion")) {
+                throw new IOException("manifest 与 sampling 格式版本不一致");
+            }
+            if (decoded.getRawRecordCount() != manifest.getInt("recordCount")) {
+                throw new IOException("manifest 与 sampling 记录数不一致");
+            }
+            return new ParsedAnalysis(buildAnalysisData(manifest, decoded),
+                    decoded.getTrace());
+        } catch (JSONException e) {
+            throw new IOException("生成堆栈报告失败", e);
+        }
+    }
+
+    private AnalysisData buildAnalysisData(JSONObject manifest,
+                                           SamplingTraceDecoder.DecodedSampling decoded)
+            throws JSONException {
         long windowStart = manifest.getLong("actualStartNs");
         long windowEnd = manifest.getLong("actualEndNs");
         long configuredInterval = manifest.optLong("minSampleIntervalNs", 0);
@@ -239,8 +309,6 @@ public final class StackAnalyzer {
             return Integer.compare(left.tid, right.tid);
         });
 
-        JSONArray threadJson = new JSONArray();
-        int[] ids = {1};
         List<Interval> allEstimated = new ArrayList<>();
         for (ThreadData thread : threads) {
             thread.segments.sort(Comparator.comparingLong(segment -> segment.start));
@@ -252,7 +320,6 @@ public final class StackAnalyzer {
                     allEstimated.add(new Interval(segment.start, segment.estimatedEnd));
                 }
             }
-            threadJson.put(threadToJson(thread, windowStart, ids));
         }
 
         JSONArray warnings = new JSONArray();
@@ -269,34 +336,73 @@ public final class StackAnalyzer {
             warnings.put("环形缓冲区曾覆盖旧记录");
         }
 
-        JSONObject report = new JSONObject();
-        report.put("schemaVersion", 1);
-        report.put("artifactType", "RHEA_STACK_REPORT");
-        report.put("selectionType", manifest.getString("selectionType"));
-        report.put("appName", manifest.optString("appName", ""));
-        report.put("mappingId", manifest.optString("mappingId", ""));
-        report.put("processId", processId);
-        report.put("requestedStartNs", manifest.opt("requestedStartNs"));
-        report.put("requestedEndNs", manifest.opt("requestedEndNs"));
-        report.put("availableStartNs", manifest.optLong("availableStartNs", windowStart));
-        report.put("availableEndNs", manifest.optLong("availableEndNs", windowEnd));
-        report.put("actualStartNs", windowStart);
-        report.put("actualEndNs", windowEnd);
-        report.put("durationNs", windowEnd - windowStart);
-        report.put("recordCount", manifest.optInt("recordCount",
-                pointCount + exactCount));
-        report.put("pointSampleCount", pointCount);
-        report.put("exactRecordCount", exactCount);
-        report.put("exactCoveredDurationNs", mergeDuration(allExact));
-        report.put("estimatedCoveredDurationNs", mergeDuration(allEstimated));
-        report.put("estimationPolicy", new JSONObject()
+        JSONObject estimationPolicy = new JSONObject()
                 .put("pointPolicy", "UNTIL_NEXT_SAMPLE_CAPPED")
                 .put("nominalIntervalNs", nominalInterval)
                 .put("nominalIntervalSource",
                         intervalFromManifest ? "MANIFEST" : "DEFAULT_10_MS")
                 .put("maxPointDurationNs", maxPointDuration)
                 .put("maxIntervalMultiplier", ESTIMATE_CAP_MULTIPLIER)
-                .put("lastPointDurationNs", nominalInterval));
+                .put("lastPointDurationNs", nominalInterval);
+        return new AnalysisData(manifest, windowStart, windowEnd, processId,
+                pointCount, exactCount, allExact,
+                allEstimated, threads, warnings, estimationPolicy);
+    }
+
+    private JSONObject buildReport(AnalysisData data, StackAnalysisRequest request)
+            throws JSONException {
+        JSONArray threadJson = new JSONArray();
+        int[] ids = {1};
+        for (ThreadData thread : data.threads) {
+            threadJson.put(threadToJson(thread, data.windowStart, ids));
+        }
+        JSONObject report = buildCommonReport(data, "RHEA_STACK_REPORT");
+        report.put("renderDefaults", new JSONObject()
+                .put("thread", request.getThread())
+                .put("sort", request.getSort())
+                .put("flameMetric", "estimated")
+                .put("view", "flame"));
+        report.put("threads", threadJson);
+        report.put("warnings", data.warnings);
+        return report;
+    }
+
+    private JSONObject buildCallTreeReport(AnalysisData data) throws JSONException {
+        JSONArray threadJson = new JSONArray();
+        int[] ids = {1};
+        for (ThreadData thread : data.threads) {
+            threadJson.put(treeThreadToJson(thread, ids));
+        }
+        JSONObject report = buildCommonReport(data, "RHEA_STACK_CALL_TREE");
+        report.put("threads", threadJson);
+        report.put("warnings", data.warnings);
+        return report;
+    }
+
+    private static JSONObject buildCommonReport(AnalysisData data, String artifactType)
+            throws JSONException {
+        JSONObject manifest = data.manifest;
+        JSONObject report = new JSONObject();
+        report.put("schemaVersion", 1);
+        report.put("artifactType", artifactType);
+        report.put("selectionType", manifest.getString("selectionType"));
+        report.put("appName", manifest.optString("appName", ""));
+        report.put("mappingId", manifest.optString("mappingId", ""));
+        report.put("processId", data.processId);
+        report.put("requestedStartNs", manifest.opt("requestedStartNs"));
+        report.put("requestedEndNs", manifest.opt("requestedEndNs"));
+        report.put("availableStartNs", manifest.optLong("availableStartNs", data.windowStart));
+        report.put("availableEndNs", manifest.optLong("availableEndNs", data.windowEnd));
+        report.put("actualStartNs", data.windowStart);
+        report.put("actualEndNs", data.windowEnd);
+        report.put("durationNs", data.windowEnd - data.windowStart);
+        report.put("recordCount", manifest.optInt("recordCount",
+                data.pointCount + data.exactCount));
+        report.put("pointSampleCount", data.pointCount);
+        report.put("exactRecordCount", data.exactCount);
+        report.put("exactCoveredDurationNs", mergeDuration(data.allExact));
+        report.put("estimatedCoveredDurationNs", mergeDuration(data.allEstimated));
+        report.put("estimationPolicy", data.estimationPolicy);
         report.put("overwrittenRecordCount",
                 manifest.optLong("overwrittenRecordCount", 0));
         report.put("droppedByRateLimit", manifest.optLong("droppedByRateLimit", 0));
@@ -305,13 +411,6 @@ public final class StackAnalyzer {
                 .put("selfDurationNs", "当前节点精确区间并集扣除直接子节点精确区间并集，表示未归属区间而非 CPU 自耗时")
                 .put("pointSampleDuration", JSONObject.NULL)
                 .put("pointSamplesContinuous", false));
-        report.put("renderDefaults", new JSONObject()
-                .put("thread", request.getThread())
-                .put("sort", request.getSort())
-                .put("flameMetric", "estimated")
-                .put("view", "flame"));
-        report.put("threads", threadJson);
-        report.put("warnings", warnings);
         return report;
     }
 
@@ -350,6 +449,27 @@ public final class StackAnalyzer {
                 .put("sampleCount", thread.segments.size())
                 .put("estimatedCoveredDurationNs", estimatedCoveredDuration(thread.segments))
                 .put("segments", segments)
+                .put("callTree", roots);
+    }
+
+    /**
+     * 只序列化调用树。先预留完整报告中 segments/stack 使用的 ID，保持树节点 ID 稳定。
+     */
+    private static JSONObject treeThreadToJson(ThreadData thread, int[] ids)
+            throws JSONException {
+        for (Segment segment : thread.segments) {
+            ids[0]++;
+            ids[0] += segment.frames.size();
+        }
+        JSONArray roots = new JSONArray();
+        for (TreeNode root : thread.roots.values()) {
+            roots.put(treeToJson(root, ids));
+        }
+        return new JSONObject()
+                .put("tid", thread.tid)
+                .put("threadName", thread.name)
+                .put("sampleCount", thread.segments.size())
+                .put("estimatedCoveredDurationNs", estimatedCoveredDuration(thread.segments))
                 .put("callTree", roots);
     }
 
