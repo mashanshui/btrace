@@ -26,6 +26,7 @@
 #include <dirent.h>
 #include <new>
 #include <string>
+#include <algorithm>
 
 #include "../utils/time.h"
 #include "../utils/misc.h"
@@ -35,6 +36,24 @@
 
 
 namespace rheatrace {
+
+namespace {
+
+constexpr uint64_t kCaptureStatsWindowNs = 1ULL * 1000ULL * 1000ULL * 1000ULL;
+
+uint64_t elapsedNanos(uint64_t beginNs, uint64_t endNs) {
+    return endNs >= beginNs ? endNs - beginNs : 0;
+}
+
+void addSaturated(uint64_t* value, uint64_t delta) {
+    if (UINT64_MAX - *value < delta) {
+        *value = UINT64_MAX;
+    } else {
+        *value += delta;
+    }
+}
+
+} // namespace
 
 std::atomic<SamplingCollector*> SamplingCollector::sInstance{nullptr};
 std::atomic<bool> SamplingCollector::sOnlineEnabled{false};
@@ -102,6 +121,8 @@ bool SamplingCollector::request(SamplingType type, void* self, bool force, bool 
             return false;
         }
     }
+    const bool collectStats = collector->config.enableStackCaptureStats;
+    const uint64_t statsBeginNano = collectStats ? current_boot_time_nanos() : 0;
     auto currentNano = current_clock_id_time_nanos(collector->config.clockId);
     const uint64_t intervalNs = mainThread ? collector->config.mainThreadJavaIntervalNs
                                            : collector->config.otherThreadJavaIntervalNs;
@@ -144,9 +165,19 @@ bool SamplingCollector::request(SamplingType type, void* self, bool force, bool 
             r.mEndCpuTime = 0;
         }
         collector->write(r);
+        if (collectStats) {
+            const uint64_t statsEndNano = current_boot_time_nanos();
+            collector->recordCaptureStats(true, elapsedNanos(statsBeginNano, statsEndNano),
+                                          statsEndNano);
+        }
         return true;
     }
     collector->droppedByRateLimit.fetch_add(1, std::memory_order_relaxed);
+    if (collectStats) {
+        const uint64_t statsEndNano = current_boot_time_nanos();
+        collector->recordCaptureStats(false, elapsedNanos(statsBeginNano, statsEndNano),
+                                      statsEndNano);
+    }
     return false;
 }
 
@@ -160,11 +191,85 @@ bool SamplingCollector::start(JNIEnv* env, jlongArray asyncConfigs) {
         ALOGE("sampling hooks init failed");
         return false;
     }
+    resetCaptureStats();
     paused.store(false, std::memory_order_release);
     if (config.onlineMode) {
         sOnlineEnabled.store(true, std::memory_order_release);
     }
     return true;
+}
+
+void SamplingCollector::resetCaptureStats() {
+    std::lock_guard<std::mutex> lock(captureStatsMutex);
+    captureStatsWindowStartNs = current_boot_time_nanos();
+    captureDurationSamplesNs.clear();
+    rateLimitedStatsCount = 0;
+    rateLimitedWastedNs = 0;
+}
+
+void SamplingCollector::recordCaptureStats(bool complete, uint64_t elapsedNs, uint64_t nowNs) {
+    std::vector<uint64_t> samples;
+    uint64_t rateLimitedCount = 0;
+    uint64_t wastedNs = 0;
+    bool shouldReport = false;
+    {
+        std::lock_guard<std::mutex> lock(captureStatsMutex);
+        // request() 可由多个线程并发返回；较早完成的调用不能把已经开始的窗口回拨。
+        if (captureStatsWindowStartNs == 0) {
+            captureStatsWindowStartNs = nowNs;
+        }
+        if (complete) {
+            captureDurationSamplesNs.push_back(elapsedNs);
+        } else {
+            rateLimitedStatsCount++;
+            addSaturated(&rateLimitedWastedNs, elapsedNs);
+        }
+        if (nowNs >= captureStatsWindowStartNs
+                && nowNs - captureStatsWindowStartNs >= kCaptureStatsWindowNs) {
+            samples.swap(captureDurationSamplesNs);
+            rateLimitedCount = rateLimitedStatsCount;
+            wastedNs = rateLimitedWastedNs;
+            rateLimitedStatsCount = 0;
+            rateLimitedWastedNs = 0;
+            captureStatsWindowStartNs = nowNs;
+            shouldReport = true;
+        }
+    }
+    if (!shouldReport) {
+        return;
+    }
+
+    if (samples.empty()) {
+        ALOGI("stack capture stats (5s): success_count=0, min_ms=N/A, median_ms=N/A, "
+              "avg_ms=N/A, max_ms=N/A, capture_total_ms=0.000, rate_limited_count=%llu, "
+              "rate_limited_wasted_ms=%.3f",
+              static_cast<unsigned long long>(rateLimitedCount),
+              static_cast<double>(wastedNs) / 1000000.0);
+        return;
+    }
+
+    std::sort(samples.begin(), samples.end());
+    const size_t sampleCount = samples.size();
+    long double totalNs = 0;
+    for (uint64_t sample : samples) {
+        totalNs += static_cast<long double>(sample);
+    }
+    long double medianNs = static_cast<long double>(samples[sampleCount / 2]);
+    if (sampleCount % 2 == 0) {
+        medianNs = (static_cast<long double>(samples[sampleCount / 2 - 1])
+                + static_cast<long double>(samples[sampleCount / 2])) / 2.0L;
+    }
+    ALOGI("stack capture stats (5s): success_count=%zu, min_ms=%.3f, median_ms=%.3f, "
+          "avg_ms=%.3f, max_ms=%.3f, capture_total_ms=%.3f, rate_limited_count=%llu, "
+          "rate_limited_wasted_ms=%.3f",
+          sampleCount,
+          static_cast<double>(samples.front()) / 1000000.0,
+          static_cast<double>(medianNs) / 1000000.0,
+          static_cast<double>(totalNs / static_cast<long double>(sampleCount) / 1000000.0L),
+          static_cast<double>(samples.back()) / 1000000.0,
+          static_cast<double>(totalNs / 1000000.0L),
+          static_cast<unsigned long long>(rateLimitedCount),
+          static_cast<double>(wastedNs) / 1000000.0);
 }
 
 class SamplingDumper : public Dumper {

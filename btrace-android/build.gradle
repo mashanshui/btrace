@@ -159,3 +159,15 @@ tasks.register('verifyKnowledgeBase') {
         logger.lifecycle("知识库校验通过：${markdownFiles.unique().size()} 个 Markdown 文件")
     }
 }
+
+tasks.register('publishRheaInhouse') {
+    group = 'publishing'
+    description = '发布 rhea-inhouse 到配置的 Maven 仓库。'
+    dependsOn ':rhea-inhouse:publish'
+}
+
+tasks.register('publishRheaInhouseToCentralPortal') {
+    group = 'publishing'
+    description = '上传 rhea-inhouse 并提交到 Maven Central Publisher Portal。'
+    dependsOn ':rhea-inhouse:publishToCentralPortal'
+}

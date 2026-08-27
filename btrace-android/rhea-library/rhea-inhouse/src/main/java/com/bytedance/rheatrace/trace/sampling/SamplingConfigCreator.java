@@ -31,8 +31,9 @@ public class SamplingConfigCreator implements TraceConfigCreator<SamplingConfig>
             config.setOtherThreadIntervalNs(intervalNs);
             config.setClockType(2); // boottime
             config.setStackWalkKind(0);
-            // 在线首版只保留主线程同步抓栈，关闭高成本的附加统计。
+            // 在线模式的附加统计均由配置控制，默认关闭高成本统计。
             config.setEnableRusage(TraceManager.isOnlineRusageEnabled());
+            config.setEnableStackCaptureStats(TraceManager.isOnlineStackCaptureStatsEnabled());
             config.setDisableObjectAllocation(!TraceManager.isOnlineObjectAllocationEnabled());
             config.setEnableWakeup(TraceManager.isOnlineWakeupEnabled());
             config.setEnableJniHook(TraceManager.isOnlineJniHookEnabled());
@@ -49,6 +50,7 @@ public class SamplingConfigCreator implements TraceConfigCreator<SamplingConfig>
         config.setClockType(2); // boottime
         config.setStackWalkKind(0);
         config.setEnableRusage(true);
+        config.setEnableStackCaptureStats(TraceProperties.isStackCaptureStatsEnabled());
         config.setDisableObjectAllocation(false);
         config.setEnableWakeup(true);
         config.setEnableThreadNames(true);

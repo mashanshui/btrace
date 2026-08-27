@@ -52,7 +52,7 @@ Windows 优先使用 Gradle Wrapper：
 
 ### 发布边界
 
-三个发布模块使用 `POM_GROUP_ID=com.bytedance.btrace` 和统一版本：
+三个模块共用 `POM_GROUP_ID=io.github.mashanshui` 和统一版本；本次 Central 发布只选择 `rhea-inhouse`：
 
 - `rhea-inhouse`：AAR，包含真实 Java/Native 实现；
 - `rhea-inhouse-noop`：AAR，公共 API 空实现；
@@ -66,6 +66,48 @@ Windows 优先使用 Gradle Wrapper：
 4. AAR ABI、consumer ProGuard 规则和依赖完整；
 5. jar 包含两个平台的 `record_android_trace` 资源及正确 manifest；
 6. 没有凭据、本机路径或生成产物进入提交。
+
+### 发布到 Maven Central
+
+当前仓库的发布脚本使用 Gradle 内置 `maven-publish`，通过 Sonatype Central Portal 的 OSSRH Staging API 兼容服务上传，再调用 Portal 收口接口。旧的 `oss.sonatype.org` 地址已停止服务，不能继续使用。
+
+本仓库当前只发布主库 `rhea-inhouse`，公开坐标为：
+
+```text
+io.github.mashanshui:rhea-inhouse:1.0.0
+```
+
+发布者必须先在 [Central Publisher Portal](https://central.sonatype.com/) 验证 `io.github.mashanshui` namespace，并在 [User Tokens](https://central.sonatype.com/usertoken) 页面生成 Portal User Token。还需要准备可用的 GPG/PGP 私钥；Central 要求主 AAR、POM、sources、javadoc 及每个文件的签名和校验和。
+
+凭据和私钥只能写入被 Git 忽略的 `local.properties`，或通过环境变量传入。已有的 `sdk.dir` 保持不变，示例配置如下（不要把占位符提交为真实凭据）：
+
+```properties
+centralPortalNamespace=io.github.mashanshui
+centralUsername=<Portal Token username>
+centralPassword=<Portal Token password>
+signing.keyId=<GPG key id>
+signing.password=<GPG key password>
+signing.secretKeyRingFile=C:\\Users\\<user>\\.gnupg\\secring.gpg
+# 也可改用 ASCII-armored 私钥（不要与 secretKeyRingFile 同时配置）
+# signingInMemoryKey=<ASCII-armored GPG secret key>
+```
+
+也可以使用 `CENTRAL_TOKEN_USERNAME`、`CENTRAL_TOKEN_PASSWORD`、`SIGNING_KEY_ID`、`SIGNING_PASSWORD`、`SIGNING_SECRET_KEY_RING_FILE` 和 `SIGNING_IN_MEMORY_KEY` 环境变量。为兼容旧项目，`mavenCentralUsername`/`mavenCentralPassword` 也会被识别，但它们必须是 Central Portal User Token，而不是已经停用的 OSSRH Token。`centralPublishingType` 默认为 `user_managed`，即上传并等待 Portal 校验后在网页中确认发布；只有明确需要自动发布时，才设置为 `automatic`。
+
+先做本地构建和 POM 检查：
+
+```powershell
+.\gradlew.bat :rhea-inhouse:assembleRelease
+.\gradlew.bat :rhea-inhouse:generatePomFileForMavenPublication
+```
+
+确认凭据、签名和 namespace 后，从同一台机器执行上传：
+
+```powershell
+.\gradlew.bat publishRheaInhouseToCentralPortal
+```
+
+该任务会先执行 `publishMavenPublicationToCentralRepository`，随后调用 `manual/upload/defaultRepository/io.github.mashanshui`。默认的 `user_managed` 模式不会绕过 Portal 校验；任务成功后应打开 [Deployments](https://central.sonatype.com/publishing)，确认校验结果，再手动 Publish。发布到 Central 的版本不可修改或删除，因此首次正式版本应在 Portal 校验通过后再确认。
 
 ### 文档维护矩阵
 

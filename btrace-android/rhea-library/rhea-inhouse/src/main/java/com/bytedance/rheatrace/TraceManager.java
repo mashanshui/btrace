@@ -187,6 +187,11 @@ public class TraceManager {
         return config != null && config.isEnableRusage();
     }
 
+    public static boolean isOnlineStackCaptureStatsEnabled() {
+        RheaTrace3.OnlineTraceConfig config = getInstance().onlineConfig;
+        return config != null && config.isEnableStackCaptureStats();
+    }
+
     /** 将配置的字节数换算为 native 记录数；双缓冲的内存估算已包含在常量中。 */
     public static int getOnlineBufferCapacityRecords() {
         int bytes = getOnlineBufferSizeBytes();

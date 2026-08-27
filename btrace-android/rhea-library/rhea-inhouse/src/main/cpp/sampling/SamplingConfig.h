@@ -44,6 +44,7 @@ private:
     bool onlineMode = false;
     bool mainThreadOnly = false;
     bool enableJniHook = true;
+    bool enableStackCaptureStats = false;
 
     friend class SamplingCollector;
 };

@@ -44,6 +44,7 @@ class MainActivity : AppCompatActivity() {
                 val endNs = SystemClock.elapsedRealtimeNanos()
                 if (endNs > messageStartNs + 100000000) {
                     Log.e(TAG, "onMessageEnd: ")
+                    RheaTrace3.captureStackTrace(false)
                     val exportStackData =
                         RheaTrace3.exportStackData(messageStartNs, endNs, RheaTrace3.ExportCallback { result: RheaTrace3.ExportResult? ->
                             Log.e(TAG, "onMessageEnd: " + result?.artifact?.path)

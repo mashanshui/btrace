@@ -41,6 +41,7 @@ SamplingConfig::SamplingConfig(JNIEnv* env, jlongArray rawConfigArray) {
     onlineMode = length > 10 && intervals[10] != 0;
     mainThreadOnly = length > 11 && intervals[11] != 0;
     enableJniHook = length <= 12 || intervals[12] != 0;
+    enableStackCaptureStats = length > 13 && intervals[13] != 0;
     env->ReleaseLongArrayElements(rawConfigArray, intervals, JNI_ABORT);
 }
 

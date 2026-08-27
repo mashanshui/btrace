@@ -60,6 +60,7 @@ public final class RheaTrace3 {
         private final boolean enableObjectAllocation;
         private final boolean enableWakeup;
         private final boolean enableRusage;
+        private final boolean enableStackCaptureStats;
         private final String mappingId;
 
         private OnlineTraceConfig(Builder builder) {
@@ -74,6 +75,7 @@ public final class RheaTrace3 {
             enableObjectAllocation = builder.enableObjectAllocation;
             enableWakeup = builder.enableWakeup;
             enableRusage = builder.enableRusage;
+            enableStackCaptureStats = builder.enableStackCaptureStats;
             mappingId = builder.mappingId;
         }
 
@@ -88,6 +90,7 @@ public final class RheaTrace3 {
         public boolean isEnableObjectAllocation() { return enableObjectAllocation; }
         public boolean isEnableWakeup() { return enableWakeup; }
         public boolean isEnableRusage() { return enableRusage; }
+        public boolean isEnableStackCaptureStats() { return enableStackCaptureStats; }
         public String getMappingId() { return mappingId; }
 
         public static Builder builder() { return new Builder(); }
@@ -104,6 +107,7 @@ public final class RheaTrace3 {
             private boolean enableObjectAllocation;
             private boolean enableWakeup;
             private boolean enableRusage;
+            private boolean enableStackCaptureStats;
             private String mappingId = "";
 
             public Builder setBufferSizeBytes(int value) {
@@ -158,6 +162,11 @@ public final class RheaTrace3 {
 
             public Builder setEnableRusage(boolean value) {
                 enableRusage = value;
+                return this;
+            }
+
+            public Builder setEnableStackCaptureStats(boolean value) {
+                enableStackCaptureStats = value;
                 return this;
             }
 

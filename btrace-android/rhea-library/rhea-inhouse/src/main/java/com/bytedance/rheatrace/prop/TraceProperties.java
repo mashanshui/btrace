@@ -27,6 +27,7 @@ public class TraceProperties {
     private static final String KEY_WAIT_TRACE_TIMEOUT = "debug.rhea3.waitTraceTimeout";
     private static final String KEY_BUFFER_SIZE = "debug.rhea3.methodIdMaxSize";
     private static final String KEY_SAMPLE_INTERVAL = "debug.rhea3.sampleInterval";
+    private static final String KEY_STACK_CAPTURE_STATS = "debug.rhea3.enableStackCaptureStats";
 
     private static final int DEFAULT_WAIT_TRACE_TIMEOUT_SECONDS = 20;
 
@@ -82,6 +83,11 @@ public class TraceProperties {
             return defaultIntervalNs;
         }
         return defaultIntervalNs;
+    }
+
+    public static boolean isStackCaptureStatsEnabled() {
+        String value = Fetcher.fetch(KEY_STACK_CAPTURE_STATS);
+        return "1".equals(value);
     }
 
     private static class Fetcher {

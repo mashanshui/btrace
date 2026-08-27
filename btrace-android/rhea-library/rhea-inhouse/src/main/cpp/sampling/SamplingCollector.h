@@ -23,6 +23,8 @@
 #include "../utils/time.h"
 #include <unistd.h>
 #include <atomic>
+#include <mutex>
+#include <vector>
 
 namespace rheatrace {
 
@@ -48,7 +50,11 @@ public:
     }
 
     static void setOnlineEnabled(bool enabled) {
-        sOnlineEnabled.store(enabled, std::memory_order_release);
+        const bool previous = sOnlineEnabled.exchange(enabled, std::memory_order_acq_rel);
+        auto* instance = sInstance.load(std::memory_order_acquire);
+        if (instance != nullptr && previous != enabled) {
+            instance->resetCaptureStats();
+        }
     }
 
     static bool
@@ -68,6 +74,7 @@ public:
         if (config.onlineMode) {
             sOnlineEnabled.store(false, std::memory_order_release);
         }
+        resetCaptureStats();
     }
 
     int64_t write(SamplingRecord& r) {
@@ -108,11 +115,20 @@ private:
               config(config), paused(true) {
     }
 
+    void resetCaptureStats();
+
+    void recordCaptureStats(bool complete, uint64_t elapsedNs, uint64_t nowNs);
+
     static std::atomic<SamplingCollector*> sInstance;
     static std::atomic<bool> sOnlineEnabled;
     SamplingConfig config;
     std::atomic<bool> paused;
     std::atomic<uint64_t> droppedByRateLimit{0};
+    std::mutex captureStatsMutex;
+    uint64_t captureStatsWindowStartNs = 0;
+    std::vector<uint64_t> captureDurationSamplesNs;
+    uint64_t rateLimitedStatsCount = 0;
+    uint64_t rateLimitedWastedNs = 0;
 };
 
 class ScopeSampling {

@@ -17,6 +17,11 @@ public class RheaTrace3Test {
         Assert.assertEquals(5 * 1024 * 1024, config.getBufferSizeBytes());
         Assert.assertEquals(10_000_000L, config.getMinSampleIntervalNs());
         Assert.assertFalse(config.isEnableJniHook());
+        Assert.assertFalse(config.isEnableStackCaptureStats());
+        Assert.assertTrue(RheaTrace3.OnlineTraceConfig.builder()
+                .setEnableStackCaptureStats(true)
+                .build()
+                .isEnableStackCaptureStats());
         Assert.assertEquals(RheaTrace3.ExportRequestResult.INVALID_RANGE,
                 RheaTrace3.exportStackData(10, 10, null));
         Assert.assertEquals(RheaTrace3.ExportRequestResult.DISABLED,

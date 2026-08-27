@@ -1,29 +1,114 @@
 import org.gradle.api.publish.maven.MavenPublication
 
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
+import java.util.Base64
+import java.util.Locale
+import java.util.Properties
+
 apply plugin: 'maven-publish'
 apply plugin: 'signing'
 
+// Keep publishing credentials out of the repository. Values from local.properties
+// take precedence over environment variables so the Android SDK entry in that
+// file does not prevent CI credentials from being used.
 ext["LOCAL_URL"] = ''
-
+ext["centralPortalNamespace"] = ''
+ext["centralUsername"] = ''
+ext["centralPassword"] = ''
+ext["centralPublishingType"] = 'user_managed'
+ext["mavenCentralUsername"] = ''
+ext["mavenCentralPassword"] = ''
+ext["signingInMemoryKey"] = ''
+ext["signingPassword"] = ''
+ext["signingKeyId"] = ''
 ext["signing.keyId"] = ''
 ext["signing.password"] = ''
 ext["signing.secretKeyRingFile"] = ''
 ext["ossrhUsername"] = ''
 ext["ossrhPassword"] = ''
 
+def environmentProperties = [
+        'centralUsername'          : 'CENTRAL_TOKEN_USERNAME',
+        'centralPassword'          : 'CENTRAL_TOKEN_PASSWORD',
+        'mavenCentralUsername'     : 'MAVEN_CENTRAL_USERNAME',
+        'mavenCentralPassword'     : 'MAVEN_CENTRAL_PASSWORD',
+        'centralPortalNamespace'   : 'CENTRAL_PORTAL_NAMESPACE',
+        'centralPublishingType'    : 'CENTRAL_PUBLISHING_TYPE',
+        'signingInMemoryKey'       : 'SIGNING_IN_MEMORY_KEY',
+        'signing.keyId'            : 'SIGNING_KEY_ID',
+        'signing.password'         : 'SIGNING_PASSWORD',
+        'signing.secretKeyRingFile': 'SIGNING_SECRET_KEY_RING_FILE',
+        'ossrhUsername'            : 'OSSRH_USERNAME',
+        'ossrhPassword'            : 'OSSRH_PASSWORD'
+]
+environmentProperties.each { String propertyName, String environmentName ->
+    String environmentValue = System.getenv(environmentName)
+    if (environmentValue != null && !environmentValue.isEmpty()) {
+        ext[propertyName] = environmentValue
+    }
+}
+
 File secretPropsFile = project.rootProject.file('local.properties')
 if (secretPropsFile.exists()) {
-    Properties p = new Properties()
-    p.load(new FileInputStream(secretPropsFile))
-    p.each { name, value ->
-        ext[name] = value
+    Properties properties = new Properties()
+    secretPropsFile.withInputStream { InputStream input ->
+        properties.load(input)
     }
-} else {
-    ext["signing.keyId"] = System.getenv('SIGNING_KEY_ID')
-    ext["signing.password"] = System.getenv('SIGNING_PASSWORD')
-    ext["signing.secretKeyRingFile"] = System.getenv('SIGNING_SECRET_KEY_RING_FILE')
-    ext["ossrhUsername"] = System.getenv('OSSRH_USERNAME')
-    ext["ossrhPassword"] = System.getenv('OSSRH_PASSWORD')
+    properties.each { name, value ->
+        ext[name.toString()] = value.toString()
+    }
+}
+
+// Keep the old names as aliases for existing local setups, while Central Portal
+// users can use the clearer centralUsername/centralPassword properties.
+if (!centralUsername && ossrhUsername) {
+    ext.centralUsername = ossrhUsername
+}
+if (!centralPassword && ossrhPassword) {
+    ext.centralPassword = ossrhPassword
+}
+if (!centralUsername && mavenCentralUsername) {
+    ext.centralUsername = mavenCentralUsername
+}
+if (!centralPassword && mavenCentralPassword) {
+    ext.centralPassword = mavenCentralPassword
+}
+if (!ossrhUsername && centralUsername) {
+    ext.ossrhUsername = centralUsername
+}
+if (!ossrhPassword && centralPassword) {
+    ext.ossrhPassword = centralPassword
+}
+if (!mavenCentralUsername && centralUsername) {
+    ext.mavenCentralUsername = centralUsername
+}
+if (!mavenCentralPassword && centralPassword) {
+    ext.mavenCentralPassword = centralPassword
+}
+if (!centralPortalNamespace) {
+    ext.centralPortalNamespace = POM_GROUP_ID
+}
+if (!signingPassword) {
+    String configuredSigningPassword = project.findProperty('signing.password')
+    if (configuredSigningPassword) {
+        ext.signingPassword = configuredSigningPassword
+    }
+}
+if (!signingKeyId) {
+    String configuredSigningKeyId = project.findProperty('signing.keyId')
+    if (configuredSigningKeyId) {
+        ext.signingKeyId = configuredSigningKeyId
+    }
+}
+String configuredSecretKeyRingFile = project.findProperty('signing.secretKeyRingFile')
+if (configuredSecretKeyRingFile) {
+    // local.properties is read from the repository root. Resolve relative key
+    // paths there once so every subproject uses the same key file.
+    ext["signing.secretKeyRingFile"] = project.rootProject.file(
+            configuredSecretKeyRingFile).absolutePath
 }
 
 def isReleaseBuild() {
@@ -35,7 +120,70 @@ def getSnapshotUrl() {
     if (localUrl) {
         return uri(localUrl)
     }
-    return "https://oss.sonatype.org/content/repositories/snapshots/"
+    return "https://central.sonatype.com/repository/maven-snapshots/"
+}
+
+def getReleaseUrl() {
+    // Gradle's built-in maven-publish plugin is supported through Sonatype's
+    // Portal OSSRH Staging API compatibility service. The old oss.sonatype.org
+    // endpoint was retired on 2025-06-30.
+    return "https://ossrh-staging-api.central.sonatype.com/service/local/staging/deploy/maven2/"
+}
+
+def isSigningTaskRequested() {
+    return gradle.taskGraph.allTasks.any { task ->
+        task.name == 'publish' ||
+                task.name == 'publishToCentralPortal' ||
+                task.name == 'uploadArchives' ||
+                task.name == 'publishMavenPublicationToCentralRepository'
+    }
+}
+
+def uploadRepositoryToCentralPortal() {
+    String namespace = centralPortalNamespace ?: POM_GROUP_ID
+    String username = centralUsername ?: ossrhUsername
+    String password = centralPassword ?: ossrhPassword
+    String publishingType = (centralPublishingType ?: 'user_managed').toString().toLowerCase(Locale.ROOT)
+
+    if (!['user_managed', 'automatic', 'portal_api'].contains(publishingType)) {
+        throw new GradleException("centralPublishingType 必须是 user_managed、automatic 或 portal_api")
+    }
+    if (!username || !password) {
+        throw new GradleException('缺少 Central Portal User Token，请在 local.properties 或环境变量中配置 centralUsername/centralPassword')
+    }
+    if (!namespace) {
+        throw new GradleException('缺少 Central Portal namespace，请配置 centralPortalNamespace')
+    }
+
+    String encodedToken = Base64.encoder.encodeToString(
+            "${username}:${password}".getBytes(StandardCharsets.UTF_8))
+    String encodedNamespace = URLEncoder.encode(namespace, StandardCharsets.UTF_8.name())
+    URL endpoint = new URL(
+            "https://ossrh-staging-api.central.sonatype.com/manual/upload/defaultRepository/" +
+                    "${encodedNamespace}?publishing_type=${publishingType}")
+    HttpURLConnection connection = (HttpURLConnection) endpoint.openConnection()
+    try {
+        connection.requestMethod = 'POST'
+        connection.doOutput = true
+        connection.setRequestProperty('Authorization', "Bearer ${encodedToken}")
+        connection.setRequestProperty('Content-Length', '0')
+        connection.connect()
+
+        int responseCode = connection.responseCode
+        InputStream responseStream = responseCode >= 200 && responseCode < 300
+                ? connection.inputStream
+                : connection.errorStream
+        String responseBody = responseStream == null ? '' : responseStream.getText('UTF-8')
+        if (responseCode < 200 || responseCode >= 300) {
+            throw new GradleException("Central Portal 收口请求失败（HTTP ${responseCode}）：${responseBody.take(1000)}")
+        }
+        logger.lifecycle("已将 ${POM_GROUP_ID}:${POM_ARTIFACT_ID}:${POM_VERSION_NAME} 提交到 Central Portal（${publishingType}）。")
+        if (responseBody) {
+            logger.lifecycle("Central Portal 响应：${responseBody.take(1000)}")
+        }
+    } finally {
+        connection.disconnect()
+    }
 }
 
 afterEvaluate {
@@ -102,15 +250,25 @@ afterEvaluate {
 
         repositories {
             maven {
-                name = 'sonatype'
-                url = uri(isReleaseBuild()
-                        ? "https://oss.sonatype.org/service/local/staging/deploy/maven2/"
-                        : getSnapshotUrl())
+                name = 'central'
+                url = uri(isReleaseBuild() ? getReleaseUrl() : getSnapshotUrl())
                 credentials {
-                    username = ossrhUsername
-                    password = ossrhPassword
+                    username = centralUsername ?: ossrhUsername
+                    password = centralPassword ?: ossrhPassword
                 }
             }
+        }
+    }
+
+    // Upload artifacts and then move the compatibility repository into the
+    // Central Publisher Portal from the same client IP. The default is
+    // user_managed so validation and final publication remain visible in the UI.
+    tasks.register('publishToCentralPortal') {
+        group = 'publishing'
+        description = '上传当前模块并提交到 Maven Central Publisher Portal。'
+        dependsOn 'publishMavenPublicationToCentralRepository'
+        doLast {
+            uploadRepositoryToCentralPortal()
         }
     }
 
@@ -120,8 +278,15 @@ afterEvaluate {
     }
 
     signing {
+        if (signingInMemoryKey) {
+            if (signingKeyId) {
+                useInMemoryPgpKeys(signingKeyId, signingInMemoryKey, signingPassword)
+            } else {
+                useInMemoryPgpKeys(signingInMemoryKey, signingPassword)
+            }
+        }
         required {
-            isReleaseBuild() && (gradle.taskGraph.hasTask('publish') || gradle.taskGraph.hasTask('uploadArchives'))
+            isReleaseBuild() && isSigningTaskRequested()
         }
         sign publishing.publications.maven
     }

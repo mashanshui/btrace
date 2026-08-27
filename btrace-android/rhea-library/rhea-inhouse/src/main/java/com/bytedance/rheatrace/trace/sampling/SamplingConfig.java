@@ -36,6 +36,7 @@ public class SamplingConfig extends TraceConfig {
     private boolean onlineMode;
     private boolean mainThreadOnly;
     private boolean enableJniHook = true;
+    private boolean enableStackCaptureStats;
 
     public SamplingConfig(SamplingConfigCreator creator) {
         super(creator);
@@ -141,9 +142,17 @@ public class SamplingConfig extends TraceConfig {
         this.enableJniHook = enableJniHook;
     }
 
+    public boolean isEnableStackCaptureStats() {
+        return enableStackCaptureStats;
+    }
+
+    public void setEnableStackCaptureStats(boolean enableStackCaptureStats) {
+        this.enableStackCaptureStats = enableStackCaptureStats;
+    }
+
     @Override
     public long[] deflate() {
-        long[] results = new long[13];
+        long[] results = new long[14];
         results[0] = bufferSize;
         results[1] = mainThreadIntervalNs;
         results[2] = otherThreadIntervalNs;
@@ -157,6 +166,7 @@ public class SamplingConfig extends TraceConfig {
         results[10] = onlineMode ? 1 : 0;
         results[11] = mainThreadOnly ? 1 : 0;
         results[12] = enableJniHook ? 1 : 0;
+        results[13] = enableStackCaptureStats ? 1 : 0;
         return results;
     }
 
