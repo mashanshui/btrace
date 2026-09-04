@@ -6,7 +6,9 @@
 
 ### 线上堆栈 ZIP
 
-线上导出文件使用 `.rheatrace.zip`，固定包含 `manifest.json`、`sampling.bin` 和 `sampling-mapping.bin`。manifest 的 `selectionType` 为 `RANGE` 或 `ALL`，时间字段统一使用 elapsed realtime 纳秒；二进制文件继续使用下文的 Sampling v5 和 mapping v1 格式。处理器会限制解压总量、拒绝额外/重复/越界条目，并校验 manifest 中声明的大小和 SHA-256。
+线上通用导出文件使用 `.rheatrace.zip`，固定包含 `manifest.json`、`sampling.bin` 和 `sampling-mapping.bin`。manifest v1 的 `selectionType` 为 `RANGE` 或 `ALL`，时间字段统一使用 elapsed realtime 纳秒；二进制文件继续使用下文的 Sampling v5 和 mapping v1 格式。处理器会限制解压总量、拒绝额外/重复/越界条目，并校验 manifest 中声明的大小和 SHA-256。
+
+单次卡顿使用独立的 `<eventId>.rheajank.zip` 和 manifest v3。v3 的 `artifactType` 固定为 `RHEA_JANK`，包名字段固定为 `packageName`（不再写入旧的 `appId`），选择类型、Sampling 版本、字节序和时钟由协议版本固定，不在 manifest 中重复声明；分析窗口取 `messageStartNs` 到 `messageEndNs`，ProGuard/R8 mapping 业务标识默认取 `buildId`。Processor 仅接受 v1 通用产物和 v3 卡顿产物，旧 v2 卡顿产物不再兼容。
 
 ### HTTP 控制协议
 

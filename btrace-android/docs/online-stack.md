@@ -17,6 +17,10 @@ RheaTrace3.OnlineTraceConfig config = RheaTrace3.OnlineTraceConfig.builder()
         .setBufferSizeBytes(5 * 1024 * 1024)
         .setMinSampleIntervalMs(10)
         .setForegroundOnly(true)
+        .setAnonymousDeviceId("不可逆匿名设备标识")
+        .setBuildId("android-release-320")
+        .setEnvironment("production")
+        .setChannel("official")
         .build();
 
 RheaTrace3.InitResult result = RheaTrace3.initOnline(application, config);
@@ -68,6 +72,33 @@ rhea-stack-<pid>-<snapshotTimeNs>.rheatrace.zip
 
 ZIP 固定包含 manifest.json、sampling.bin 和 sampling-mapping.bin。manifest 记录请求、可用和实际时间范围、快照时间、记录数、覆盖数、限流丢弃数、采集配置和 SHA-256。默认单文件上限 10 MiB、目录配额 20 MiB，写入时先生成临时文件，校验后再原子重命名。
 
+### 卡顿 manifest v3
+
+通用 `exportStackData` 和 `exportAllStackData` 继续生成 `schemaVersion=1`、`artifactType=RHEA_STACK` 的 `.rheatrace.zip`。卡顿监控使用独立接口：
+
+~~~java
+RheaTrace3.JankEvent event = RheaTrace3.JankEvent.builder()
+        .setEventId("jank-01J6R2Z81Q9M8M1T8N7JY4P6K3")
+        .setOccurredAt(System.currentTimeMillis())
+        .setSessionId("session-20260829-001")
+        .setScene("home_feed")
+        .setMessageStartNs(messageStartNs)
+        .setMessageEndNs(messageEndNs)
+        .setThresholdNs(200_000_000L)
+        .setAttemptedSampleCount(attemptedSampleCount)
+        .build();
+
+RheaTrace3.exportJankTrace(event, result -> {
+    if (result.isSuccess()) {
+        enqueueForLocalValidation(result.getArtifact());
+    }
+});
+~~~
+
+该接口生成 `<eventId>.rheajank.zip`，manifest 固定为 `schemaVersion=3` 和 `artifactType=RHEA_JANK`，包名字段固定为 `packageName`，不再写入旧的 `appId`；它只包含事件身份、应用和查询维度、精确消息边界、采样输入、PID 以及两个二进制文件的大小和 SHA-256。它不写 v1 的请求/可用/实际范围、recordCount、Hook 开关、`mappingId` 等诊断字段；后续 mapping 默认以 `buildId` 选择。
+
+同一 `eventId` 已存在且元数据与文件校验一致时直接复用原 ZIP；元数据冲突或文件损坏时导出失败。`getPendingStackFiles()` 只枚举 v1 文件，`getPendingJankFiles()` 只枚举 v3 文件，防止现有上传链路误传新协议。旧 v2 卡顿文件不会被 Processor 接受；上传方应按服务端当前 v3 接口处理本地文件。
+
 ### 服务端解析
 
 ~~~powershell
@@ -84,13 +115,15 @@ java -jar rhea-trace-processor.jar analyze-stack `
 
 需要只生成聚合调用树时，可调用 `StackAnalyzer.analyzeCallTree(StackAnalysisRequest)`，返回可按 UTF-8 编码写出的格式化 JSON 字符串；该入口不构建 Perfetto Trace，但使用与完整报告相同的采样解码、mapping、窗口裁剪和估算逻辑。
 
+Java 服务端需要直接处理上传流时，可复用单例 `StackAnalyzer` 作为 `StackParser`：v1 调用 `parse(InputStream, File)`，v3 卡顿产物调用 `parseWithMappingResolver` 按已校验的 `buildId` 选择 mapping，并从完整报告的 `sourceManifest` 取得事件字段。解析器不关闭调用方输入流，上传压缩数据和解压总量上限均为 64 MiB，具体接入方式见[服务端堆栈解析接入](server-stack-parser-integration.md)。
+
 点采样估算规则固定为：从当前点延伸到下一条同线程记录，最多不超过 `2 × minSampleIntervalNs`；最后一点按一个采样间隔计算，所有区间裁剪到导出窗口。旧产物没有采样间隔时回退为 10 ms。时间轴按真实时间横向放置 root → leaf 调用层级，把相邻或重叠记录中路径相同的公共前缀合并成连续 slice；路径变化时只结束发生变化的分支，超过估算上限的空洞保持为空。尺下短刻度表示真实采样时刻，虚线块表示估算跨度，实线块才表示 duration Hook 的真实区间；两类证据不会相互合并。`estimatedDurationNs` 和 `estimatedSelfDurationNs` 只能用于采样归因，不能解释为精确方法耗时或 CPU 自耗时。
 
 只有带真实开始和结束时间的 duration Hook 才进入 `exactDurationNs`。普通点采样的精确耗时仍显示为 `--`；页面新增的估算耗时始终明确标记为“估算”，不会覆盖精确字段。当前热路径没有记录 Dex PC；只有 mapping 或符号本身能够可靠提供位置时才显示文件和行号，否则显示 Unknown Source。
 
 ### app 模块端到端测试
 
-`app` 提供设备测试和主机解析编排任务。普通 app 构建仍进入原有调试模式；只有显式传入 `online_trace_test=true` 时，测试构建才让示例 `Application` 初始化线上模式。测试会启动 `MainActivity`，在主线程产生采样，导出 `RANGE` 和 `ALL` 两个 ZIP，并在设备端校验 manifest、条目、文件大小和 SHA-256。随后 Gradle 任务使用 adb 拉取产物并调用 Processor 生成四类报告：
+`app` 提供设备测试和主机解析编排任务。普通 app 构建仍进入原有调试模式；只有显式传入 `online_trace_test=true` 时，测试构建才让示例 `Application` 初始化线上模式。测试会启动 `MainActivity`，在主线程产生采样，导出 `RANGE`、`ALL` 两个 v1 ZIP 和一个 v3 卡顿 ZIP，并在设备端校验 manifest、条目、文件大小、SHA-256 及同事件复用。随后 Gradle 任务使用 adb 拉取产物并调用 Processor 生成四类报告：
 
 ~~~powershell
 .\gradlew.bat --no-daemon `
@@ -121,6 +154,7 @@ java -jar rhea-trace-processor.jar analyze-stack `
 ## 相关文档
 
 - [App 端 SDK](app-sdk.md)
+- [服务端堆栈解析接入](server-stack-parser-integration.md)
 - [Native 实现](native-runtime.md)
 - [CLI 处理器](cli-processor.md)
 - [协议与数据格式](protocol-and-data-formats.md)

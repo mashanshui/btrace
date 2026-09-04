@@ -38,14 +38,38 @@ import java.util.zip.ZipFile;
 
 /** 堆栈采集 ZIP 的安全解包器。 */
 public final class StackArtifact implements Closeable {
-    private static final long MAX_TOTAL_BYTES = 64L * 1024L * 1024L;
+    static final long MAX_TOTAL_BYTES = 64L * 1024L * 1024L;
     private static final Set<String> REQUIRED = new HashSet<>();
+    private static final Set<String> JANK_V3_FIELDS = new HashSet<>();
     private static final Pattern SHA_256 = Pattern.compile("[0-9a-fA-F]{64}");
+    private static final Pattern LOWER_SHA_256 = Pattern.compile("[0-9a-f]{64}");
 
     static {
         REQUIRED.add("manifest.json");
         REQUIRED.add("sampling.bin");
         REQUIRED.add("sampling-mapping.bin");
+        JANK_V3_FIELDS.add("schemaVersion");
+        JANK_V3_FIELDS.add("artifactType");
+        JANK_V3_FIELDS.add("eventId");
+        JANK_V3_FIELDS.add("occurredAt");
+        JANK_V3_FIELDS.add("sessionId");
+        JANK_V3_FIELDS.add("anonymousDeviceId");
+        JANK_V3_FIELDS.add("packageName");
+        JANK_V3_FIELDS.add("appVersion");
+        JANK_V3_FIELDS.add("versionCode");
+        JANK_V3_FIELDS.add("buildId");
+        JANK_V3_FIELDS.add("environment");
+        JANK_V3_FIELDS.add("channel");
+        JANK_V3_FIELDS.add("osVersion");
+        JANK_V3_FIELDS.add("deviceModel");
+        JANK_V3_FIELDS.add("scene");
+        JANK_V3_FIELDS.add("messageStartNs");
+        JANK_V3_FIELDS.add("messageEndNs");
+        JANK_V3_FIELDS.add("thresholdNs");
+        JANK_V3_FIELDS.add("minSampleIntervalNs");
+        JANK_V3_FIELDS.add("attemptedSampleCount");
+        JANK_V3_FIELDS.add("processId");
+        JANK_V3_FIELDS.add("files");
     }
 
     private final File root;
@@ -126,6 +150,22 @@ public final class StackArtifact implements Closeable {
     }
 
     private static void validateManifest(JSONObject manifest) throws IOException {
+        Object version = manifest.opt("schemaVersion");
+        String artifactType = manifest.optString("artifactType", "");
+        if (isIntegral(version) && ((Number) version).longValue() == 1
+                && "RHEA_STACK".equals(artifactType)) {
+            validateStackV1Manifest(manifest);
+            return;
+        }
+        if (isIntegral(version) && ((Number) version).longValue() == 3
+                && "RHEA_JANK".equals(artifactType)) {
+            validateJankManifest(manifest);
+            return;
+        }
+        throw new IOException("不支持的堆栈产物版本");
+    }
+
+    private static void validateStackV1Manifest(JSONObject manifest) throws IOException {
         if (manifest.optInt("schemaVersion", -1) != 1
                 || !"RHEA_STACK".equals(manifest.optString("artifactType", ""))) {
             throw new IOException("不支持的堆栈产物版本");
@@ -170,28 +210,129 @@ public final class StackArtifact implements Closeable {
         }
     }
 
+    private static void validateJankManifest(JSONObject manifest) throws IOException {
+        java.util.Iterator<String> keys = manifest.keys();
+        while (keys.hasNext()) {
+            String key = keys.next();
+            if (!JANK_V3_FIELDS.contains(key)) {
+                throw new IOException("manifest 卡顿协议包含未约定字段: " + key);
+            }
+        }
+        if (manifest.length() != JANK_V3_FIELDS.size()) {
+            throw new IOException("manifest 卡顿协议缺少必填字段");
+        }
+        requireString(manifest, "eventId", 128);
+        requirePositiveLong(manifest, "occurredAt");
+        requireString(manifest, "sessionId", 128);
+        requireString(manifest, "anonymousDeviceId", 256);
+        requireString(manifest, "packageName", 255);
+        requireString(manifest, "appVersion", 128);
+        requireNonNegativeLong(manifest, "versionCode");
+        requireString(manifest, "buildId", 256);
+        requireString(manifest, "environment", 64);
+        requireString(manifest, "channel", 128);
+        requireString(manifest, "osVersion", 64);
+        requireString(manifest, "deviceModel", 256);
+        requireString(manifest, "scene", 128);
+        long start = requireNonNegativeLong(manifest, "messageStartNs");
+        long end = requirePositiveLong(manifest, "messageEndNs");
+        if (end <= start) {
+            throw new IOException("manifest 消息时间范围无效");
+        }
+        long threshold = requirePositiveLong(manifest, "thresholdNs");
+        if (threshold > end - start) {
+            throw new IOException("manifest thresholdNs 超过消息耗时");
+        }
+        requirePositiveLong(manifest, "minSampleIntervalNs");
+        requireNonNegativeLong(manifest, "attemptedSampleCount");
+        requirePositiveLong(manifest, "processId");
+        if (!(manifest.opt("files") instanceof JSONObject)) {
+            throw new IOException("manifest 缺少 files 校验信息");
+        }
+    }
+
+    private static void requireString(JSONObject manifest, String key, int maxLength)
+            throws IOException {
+        Object value = manifest.opt(key);
+        if (!(value instanceof String)) {
+            throw new IOException("manifest 字段类型无效: " + key);
+        }
+        String text = (String) value;
+        if (text.trim().isEmpty() || text.length() > maxLength) {
+            throw new IOException("manifest 字段内容无效: " + key);
+        }
+    }
+
+    private static long requirePositiveLong(JSONObject manifest, String key)
+            throws IOException {
+        long value = requireIntegralLong(manifest, key);
+        if (value <= 0) {
+            throw new IOException("manifest 字段必须为正数: " + key);
+        }
+        return value;
+    }
+
+    private static long requireNonNegativeLong(JSONObject manifest, String key)
+            throws IOException {
+        long value = requireIntegralLong(manifest, key);
+        if (value < 0) {
+            throw new IOException("manifest 字段不能为负数: " + key);
+        }
+        return value;
+    }
+
+    private static long requireIntegralLong(JSONObject manifest, String key)
+            throws IOException {
+        Object value = manifest.opt(key);
+        if (!isIntegral(value)) {
+            throw new IOException("manifest 字段必须为整数: " + key);
+        }
+        return ((Number) value).longValue();
+    }
+
+    private static boolean isIntegral(Object value) {
+        return value instanceof Byte || value instanceof Short
+                || value instanceof Integer || value instanceof Long;
+    }
+
     private static void validateFiles(File root, JSONObject manifest) throws IOException {
         JSONObject files = manifest.optJSONObject("files");
         if (files == null) {
             throw new IOException("manifest 缺少 files 校验信息");
         }
-        validateFile(root, files, "sampling", "sampling.bin");
-        validateFile(root, files, "sampling-mapping", "sampling-mapping.bin");
+        boolean strictJank = manifest.optInt("schemaVersion", -1) == 3
+                && "RHEA_JANK".equals(manifest.optString("artifactType", ""));
+        if (strictJank && (files.length() != 2
+                || !files.has("sampling") || !files.has("sampling-mapping"))) {
+            throw new IOException("manifest files 字段无效");
+        }
+        validateFile(root, files, "sampling", "sampling.bin", strictJank);
+        validateFile(root, files, "sampling-mapping", "sampling-mapping.bin", strictJank);
     }
 
-    private static void validateFile(File root, JSONObject files, String key, String name)
+    private static void validateFile(File root, JSONObject files, String key, String name,
+                                     boolean strictJank)
             throws IOException {
         JSONObject expected = files.optJSONObject(key);
         if (expected == null) {
             throw new IOException("manifest 缺少文件校验信息: " + name);
         }
+        if (strictJank && (expected.length() != 2
+                || !expected.has("size") || !expected.has("sha256"))) {
+            throw new IOException("manifest 文件校验字段无效: " + name);
+        }
         File actual = new File(root, name);
+        Object sizeValue = expected.opt("size");
+        if (strictJank && !isIntegral(sizeValue)) {
+            throw new IOException("文件大小必须为整数: " + name);
+        }
         long expectedSize = expected.optLong("size", -1);
         if (expectedSize < 0 || expectedSize != actual.length()) {
             throw new IOException("文件大小校验失败: " + name);
         }
         String expectedHash = expected.optString("sha256", "");
-        if (!SHA_256.matcher(expectedHash).matches()) {
+        Pattern hashPattern = strictJank ? LOWER_SHA_256 : SHA_256;
+        if (!hashPattern.matcher(expectedHash).matches()) {
             throw new IOException("文件 SHA-256 格式无效: " + name);
         }
         if (!expectedHash.equalsIgnoreCase(sha256(actual))) {

@@ -20,6 +20,8 @@ import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.Application;
 import android.content.Context;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.os.Build;
 import android.os.Process;
@@ -69,6 +71,7 @@ public class TraceManager {
 
     private static final String TAG = "RheaTrace:Manager";
     private static final String ONLINE_ARTIFACT_SUFFIX = ".rheatrace.zip";
+    private static final String JANK_ARTIFACT_SUFFIX = ".rheajank.zip";
     private static final String ONLINE_TEMP_SUFFIX = ".tmp";
     private static final long ONLINE_TEMP_TTL_MS = 24L * 60L * 60L * 1000L;
     private static final int SAMPLING_RECORD_MEMORY_ESTIMATE = 2304;
@@ -86,6 +89,8 @@ public class TraceManager {
     private RheaTrace3.OnlineTraceConfig onlineConfig;
     private File onlineDir;
     private String onlineAppName = "";
+    private String onlineAppVersion = "";
+    private long onlineVersionCode = -1;
     private volatile boolean onlineEnabled;
     private volatile boolean onlineForeground = true;
     private volatile boolean onlineDumpBusy;
@@ -133,6 +138,7 @@ public class TraceManager {
         Context appContext = context.getApplicationContext() == null
                 ? context : context.getApplicationContext();
         onlineAppName = appContext.getPackageName();
+        readOnlinePackageInfo(appContext);
         onlineDir = new File(appContext.getNoBackupFilesDir(), "rhea/stack");
         if (!makeDumpDir(onlineDir.getAbsolutePath())) {
             resetOnlineState();
@@ -155,6 +161,21 @@ public class TraceManager {
 
     public static boolean isOnlineMode() {
         return getInstance().mode == Mode.ONLINE;
+    }
+
+    @SuppressWarnings("deprecation")
+    private void readOnlinePackageInfo(Context context) {
+        onlineAppVersion = "";
+        onlineVersionCode = -1;
+        try {
+            PackageInfo info = context.getPackageManager().getPackageInfo(
+                    context.getPackageName(), 0);
+            onlineAppVersion = info.versionName == null ? "" : info.versionName;
+            onlineVersionCode = Build.VERSION.SDK_INT >= 28
+                    ? info.getLongVersionCode() : info.versionCode;
+        } catch (PackageManager.NameNotFoundException e) {
+            Log.e(TAG, "cannot read application package metadata", e);
+        }
     }
 
     public static int getOnlineBufferSizeBytes() {
@@ -322,11 +343,12 @@ public class TraceManager {
         final long snapshotTimeNanos;
         final boolean partial;
         final long droppedByRateLimit;
+        final RheaTrace3.JankEvent jankEvent;
 
         ExportSpec(boolean all, RheaTrace3.BufferTimeRange requested,
                    RheaTrace3.BufferTimeRange available, RheaTrace3.BufferTimeRange actual,
                    long snapshotEndToken, long snapshotTimeNanos, boolean partial,
-                   long droppedByRateLimit) {
+                   long droppedByRateLimit, RheaTrace3.JankEvent jankEvent) {
             this.all = all;
             this.requested = requested;
             this.available = available;
@@ -335,6 +357,7 @@ public class TraceManager {
             this.snapshotTimeNanos = snapshotTimeNanos;
             this.partial = partial;
             this.droppedByRateLimit = droppedByRateLimit;
+            this.jankEvent = jankEvent;
         }
     }
 
@@ -374,7 +397,7 @@ public class TraceManager {
                 actualStart, actualEnd, 0, snapshot.range.getOverwrittenRecordCount());
         return submitExport(new ExportSpec(false, requested, snapshot.range, actual,
                 snapshot.endToken, snapshot.snapshotTimeNanos, partial,
-                snapshot.droppedByRateLimit), callback);
+                snapshot.droppedByRateLimit, null), callback);
     }
 
     public synchronized RheaTrace3.ExportRequestResult exportAllStackData(
@@ -389,7 +412,60 @@ public class TraceManager {
         }
         return submitExport(new ExportSpec(true, null, snapshot.range, snapshot.range,
                 snapshot.endToken, snapshot.snapshotTimeNanos, false,
-                snapshot.droppedByRateLimit), callback);
+                snapshot.droppedByRateLimit, null), callback);
+    }
+
+    public synchronized RheaTrace3.ExportRequestResult exportJankTrace(
+            RheaTrace3.JankEvent event, RheaTrace3.ExportCallback callback) {
+        RheaTrace3.ExportRequestResult state = validateExportState();
+        if (state != RheaTrace3.ExportRequestResult.ACCEPTED) {
+            return state;
+        }
+        if (event == null || !hasValidJankMetadata()) {
+            return RheaTrace3.ExportRequestResult.INVALID_JANK_METADATA;
+        }
+        long startTimeNanos = event.getMessageStartNs();
+        long endTimeNanos = event.getMessageEndNs();
+        long now = SystemClock.elapsedRealtimeNanos();
+        if (endTimeNanos > now) {
+            return RheaTrace3.ExportRequestResult.FUTURE_RANGE;
+        }
+        RangeSnapshot snapshot = readRangeSnapshot();
+        if (snapshot == null || snapshot.range.isEmpty()) {
+            return RheaTrace3.ExportRequestResult.EMPTY_RANGE;
+        }
+        long actualStart = Math.max(startTimeNanos,
+                snapshot.range.getStartElapsedRealtimeNanos());
+        long actualEnd = Math.min(endTimeNanos,
+                snapshot.range.getEndElapsedRealtimeNanos());
+        if (actualEnd <= actualStart) {
+            return RheaTrace3.ExportRequestResult.EMPTY_RANGE;
+        }
+        boolean partial = actualStart != startTimeNanos || actualEnd != endTimeNanos;
+        RheaTrace3.BufferTimeRange requested = new RheaTrace3.BufferTimeRange(
+                startTimeNanos, endTimeNanos, 0, snapshot.range.getOverwrittenRecordCount());
+        RheaTrace3.BufferTimeRange actual = new RheaTrace3.BufferTimeRange(
+                actualStart, actualEnd, 0, snapshot.range.getOverwrittenRecordCount());
+        return submitExport(new ExportSpec(false, requested, snapshot.range, actual,
+                snapshot.endToken, snapshot.snapshotTimeNanos, partial,
+                snapshot.droppedByRateLimit, event), callback);
+    }
+
+    private boolean hasValidJankMetadata() {
+        return onlineConfig != null
+                && isValidValue(onlineConfig.getAnonymousDeviceId(), 256)
+                && isValidValue(onlineConfig.getBuildId(), 256)
+                && isValidValue(onlineConfig.getEnvironment(), 64)
+                && isValidValue(onlineConfig.getChannel(), 128)
+                && isValidValue(onlineAppName, 255)
+                && isValidValue(onlineAppVersion, 128)
+                && isValidValue(Build.VERSION.RELEASE, 64)
+                && isValidValue(Build.MODEL, 256)
+                && onlineVersionCode >= 0;
+    }
+
+    private static boolean isValidValue(String value, int maxLength) {
+        return value != null && !value.trim().isEmpty() && value.length() <= maxLength;
     }
 
     private RheaTrace3.ExportRequestResult validateExportState() {
@@ -436,12 +512,30 @@ public class TraceManager {
         File artifact = null;
         File tempDir = null;
         RheaTrace3.ExportResult completion = null;
-        String baseName = "rhea-stack-" + Process.myPid() + "-" + spec.snapshotTimeNanos;
+        boolean jank = spec.jankEvent != null;
+        String baseName = jank ? spec.jankEvent.getEventId()
+                : "rhea-stack-" + Process.myPid() + "-" + spec.snapshotTimeNanos;
+        String artifactSuffix = jank ? JANK_ARTIFACT_SUFFIX : ONLINE_ARTIFACT_SUFFIX;
         try {
             if (onlineDir == null || onlineConfig == null) {
                 throw new IOException("online collector is not initialized");
             }
             cleanupOnlineArtifacts();
+            File existing = new File(onlineDir, baseName + artifactSuffix);
+            if (jank && existing.isFile()) {
+                int existingRecordCount = verifyExistingJankArtifact(
+                        existing, spec.jankEvent);
+                RheaTrace3.BufferTimeRange existingActual = new RheaTrace3.BufferTimeRange(
+                        spec.actual.getStartElapsedRealtimeNanos(),
+                        spec.actual.getEndElapsedRealtimeNanos(), existingRecordCount,
+                        spec.available.getOverwrittenRecordCount());
+                completion = new RheaTrace3.ExportResult(
+                        RheaTrace3.ExportStatus.SUCCESS, existing, spec.requested,
+                        spec.available, existingActual, existingRecordCount,
+                        spec.available.getOverwrittenRecordCount(),
+                        spec.droppedByRateLimit, "existing artifact reused");
+                return;
+            }
             tempDir = new File(onlineDir, baseName + ONLINE_TEMP_SUFFIX);
             deleteRecursively(tempDir);
             if (!tempDir.mkdirs()) {
@@ -494,14 +588,14 @@ public class TraceManager {
             File manifestFile = new File(tempDir, "manifest.json");
             writeUtf8(manifestFile, manifest.toString());
             File zipTemp = new File(onlineDir,
-                    baseName + ONLINE_ARTIFACT_SUFFIX + ONLINE_TEMP_SUFFIX);
-            File zipFinal = new File(onlineDir, baseName + ONLINE_ARTIFACT_SUFFIX);
+                    baseName + artifactSuffix + ONLINE_TEMP_SUFFIX);
+            File zipFinal = new File(onlineDir, baseName + artifactSuffix);
             deleteRecursively(zipTemp);
             zipFiles(zipTemp, manifestFile, sampling, mapping);
             if (zipTemp.length() > onlineConfig.getMaxArtifactBytes()) {
                 throw new IOException("artifact exceeds maxArtifactBytes");
             }
-            verifyZipArtifact(zipTemp, recordCount);
+            verifyZipArtifact(zipTemp, recordCount, spec);
             Files.move(zipTemp.toPath(), zipFinal.toPath(),
                     StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             artifact = zipFinal;
@@ -527,7 +621,7 @@ public class TraceManager {
             deleteRecursively(tempDir);
             if (onlineDir != null) {
                 deleteRecursively(new File(onlineDir,
-                        baseName + ONLINE_ARTIFACT_SUFFIX + ONLINE_TEMP_SUFFIX));
+                        baseName + artifactSuffix + ONLINE_TEMP_SUFFIX));
             }
             onlineDumpBusy = false;
             notifyExport(callback, completion);
@@ -535,12 +629,20 @@ public class TraceManager {
     }
 
     public synchronized List<File> getPendingStackFiles() {
+        return getPendingFiles(ONLINE_ARTIFACT_SUFFIX);
+    }
+
+    public synchronized List<File> getPendingJankFiles() {
+        return getPendingFiles(JANK_ARTIFACT_SUFFIX);
+    }
+
+    private List<File> getPendingFiles(String suffix) {
         if (onlineDir == null || !onlineDir.isDirectory()) {
             return Collections.emptyList();
         }
         cleanupOnlineArtifacts();
         File[] files = onlineDir.listFiles(
-                (dir, name) -> name.endsWith(ONLINE_ARTIFACT_SUFFIX));
+                (dir, name) -> name.endsWith(suffix));
         if (files == null || files.length == 0) {
             return Collections.emptyList();
         }
@@ -551,6 +653,14 @@ public class TraceManager {
     }
 
     public synchronized boolean deleteStackFile(File artifact) {
+        return deleteOnlineArtifact(artifact, ONLINE_ARTIFACT_SUFFIX);
+    }
+
+    public synchronized boolean deleteJankFile(File artifact) {
+        return deleteOnlineArtifact(artifact, JANK_ARTIFACT_SUFFIX);
+    }
+
+    private boolean deleteOnlineArtifact(File artifact, String suffix) {
         if (artifact == null || onlineDir == null) {
             return false;
         }
@@ -559,7 +669,7 @@ public class TraceManager {
             File target = artifact.getCanonicalFile();
             File targetParent = target.getParentFile();
             if (targetParent == null || !parent.equals(targetParent)
-                    || !target.getName().endsWith(ONLINE_ARTIFACT_SUFFIX)) {
+                    || !target.getName().endsWith(suffix)) {
                 return false;
             }
             return target.delete();
@@ -661,6 +771,9 @@ public class TraceManager {
     private JSONObject buildManifest(ExportSpec spec, RheaTrace3.BufferTimeRange actual,
                                      boolean partial, File sampling, File mapping)
             throws JSONException, IOException {
+        if (spec.jankEvent != null) {
+            return buildJankManifest(spec.jankEvent, sampling, mapping);
+        }
         JSONObject manifest = new JSONObject();
         manifest.put("schemaVersion", 1);
         manifest.put("artifactType", "RHEA_STACK");
@@ -697,6 +810,38 @@ public class TraceManager {
         manifest.put("processId", Process.myPid());
         manifest.put("androidApi", Build.VERSION.SDK_INT);
         manifest.put("abi", Build.SUPPORTED_ABIS.length == 0 ? "" : Build.SUPPORTED_ABIS[0]);
+        JSONObject files = new JSONObject();
+        files.put("sampling", fileInfo(sampling));
+        files.put("sampling-mapping", fileInfo(mapping));
+        manifest.put("files", files);
+        return manifest;
+    }
+
+    private JSONObject buildJankManifest(RheaTrace3.JankEvent event,
+                                          File sampling, File mapping)
+            throws JSONException, IOException {
+        JSONObject manifest = new JSONObject();
+        manifest.put("schemaVersion", 3);
+        manifest.put("artifactType", "RHEA_JANK");
+        manifest.put("eventId", event.getEventId());
+        manifest.put("occurredAt", event.getOccurredAt());
+        manifest.put("sessionId", event.getSessionId());
+        manifest.put("anonymousDeviceId", onlineConfig.getAnonymousDeviceId());
+        manifest.put("packageName", onlineAppName);
+        manifest.put("appVersion", onlineAppVersion);
+        manifest.put("versionCode", onlineVersionCode);
+        manifest.put("buildId", onlineConfig.getBuildId());
+        manifest.put("environment", onlineConfig.getEnvironment());
+        manifest.put("channel", onlineConfig.getChannel());
+        manifest.put("osVersion", Build.VERSION.RELEASE == null ? "" : Build.VERSION.RELEASE);
+        manifest.put("deviceModel", Build.MODEL == null ? "" : Build.MODEL);
+        manifest.put("scene", event.getScene());
+        manifest.put("messageStartNs", event.getMessageStartNs());
+        manifest.put("messageEndNs", event.getMessageEndNs());
+        manifest.put("thresholdNs", event.getThresholdNs());
+        manifest.put("minSampleIntervalNs", onlineConfig.getMinSampleIntervalNs());
+        manifest.put("attemptedSampleCount", event.getAttemptedSampleCount());
+        manifest.put("processId", Process.myPid());
         JSONObject files = new JSONObject();
         files.put("sampling", fileInfo(sampling));
         files.put("sampling-mapping", fileInfo(mapping));
@@ -778,7 +923,7 @@ public class TraceManager {
         zip.closeEntry();
     }
 
-    private static void verifyZipArtifact(File artifact, int expectedRecordCount)
+    private static void verifyZipArtifact(File artifact, int expectedRecordCount, ExportSpec spec)
             throws IOException, JSONException {
         Set<String> expected = new HashSet<>();
         expected.add("manifest.json");
@@ -800,8 +945,15 @@ public class TraceManager {
             try (InputStream input = zip.getInputStream(zip.getEntry("manifest.json"))) {
                 manifest = new JSONObject(readUtf8(input));
             }
-            if (manifest.optInt("recordCount", -1) != expectedRecordCount) {
-                throw new IOException("manifest record count does not match native output");
+            if (spec.jankEvent == null) {
+                if (manifest.optInt("recordCount", -1) != expectedRecordCount) {
+                    throw new IOException("manifest record count does not match native output");
+                }
+            } else if (manifest.optInt("schemaVersion", -1) != 3
+                    || !"RHEA_JANK".equals(manifest.optString("artifactType", ""))
+                    || !spec.jankEvent.getEventId().equals(
+                    manifest.optString("eventId", ""))) {
+                throw new IOException("jank manifest identity mismatch");
             }
             JSONObject files = manifest.getJSONObject("files");
             verifyZipEntry(zip, files.getJSONObject("sampling"), "sampling.bin");
@@ -825,6 +977,79 @@ public class TraceManager {
         }
     }
 
+    private int verifyExistingJankArtifact(File artifact, RheaTrace3.JankEvent event)
+            throws IOException, JSONException {
+        try (ZipFile zip = new ZipFile(artifact)) {
+            Set<String> actual = new HashSet<>();
+            java.util.Enumeration<? extends ZipEntry> entries = zip.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                if (entry.isDirectory() || !actual.add(entry.getName())) {
+                    throw new IOException("existing jank artifact contains invalid entries");
+                }
+            }
+            Set<String> expected = new HashSet<>();
+            expected.add("manifest.json");
+            expected.add("sampling.bin");
+            expected.add("sampling-mapping.bin");
+            if (!expected.equals(actual)) {
+                throw new IOException("existing jank artifact entries are incomplete");
+            }
+            JSONObject manifest;
+            try (InputStream input = zip.getInputStream(zip.getEntry("manifest.json"))) {
+                manifest = new JSONObject(readUtf8(input));
+            }
+            verifyJankIdentity(manifest, event);
+            JSONObject files = manifest.getJSONObject("files");
+            verifyZipEntry(zip, files.getJSONObject("sampling"), "sampling.bin");
+            verifyZipEntry(zip, files.getJSONObject("sampling-mapping"),
+                    "sampling-mapping.bin");
+            byte[] header = new byte[24];
+            try (InputStream input = zip.getInputStream(zip.getEntry("sampling.bin"))) {
+                int offset = 0;
+                while (offset < header.length) {
+                    int count = input.read(header, offset, header.length - offset);
+                    if (count < 0) {
+                        throw new IOException("existing sampling header is incomplete");
+                    }
+                    offset += count;
+                }
+            }
+            int recordCount = ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN).getInt(20);
+            if (recordCount <= 0) {
+                throw new IOException("existing sampling record count is invalid");
+            }
+            return recordCount;
+        }
+    }
+
+    private void verifyJankIdentity(JSONObject manifest, RheaTrace3.JankEvent event)
+            throws IOException {
+        boolean matches = manifest.optInt("schemaVersion", -1) == 3
+                && "RHEA_JANK".equals(manifest.optString("artifactType", ""))
+                && event.getEventId().equals(manifest.optString("eventId", ""))
+                && event.getOccurredAt() == manifest.optLong("occurredAt", -1)
+                && event.getSessionId().equals(manifest.optString("sessionId", ""))
+                && event.getScene().equals(manifest.optString("scene", ""))
+                && event.getMessageStartNs() == manifest.optLong("messageStartNs", -1)
+                && event.getMessageEndNs() == manifest.optLong("messageEndNs", -1)
+                && event.getThresholdNs() == manifest.optLong("thresholdNs", -1)
+                && event.getAttemptedSampleCount()
+                == manifest.optLong("attemptedSampleCount", -1)
+                && onlineConfig.getAnonymousDeviceId().equals(
+                manifest.optString("anonymousDeviceId", ""))
+                && onlineConfig.getBuildId().equals(manifest.optString("buildId", ""))
+                && onlineConfig.getEnvironment().equals(
+                manifest.optString("environment", ""))
+                && onlineConfig.getChannel().equals(manifest.optString("channel", ""))
+                && onlineAppName.equals(manifest.optString("packageName", ""))
+                && onlineAppVersion.equals(manifest.optString("appVersion", ""))
+                && onlineVersionCode == manifest.optLong("versionCode", -1);
+        if (!matches) {
+            throw new IOException("existing jank artifact metadata conflicts with event");
+        }
+    }
+
     private static String readUtf8(InputStream input) throws IOException {
         java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
         byte[] buffer = new byte[8192];
@@ -843,7 +1068,9 @@ public class TraceManager {
         if (onlineDir == null || !onlineDir.isDirectory()) {
             return false;
         }
-        File[] files = onlineDir.listFiles((dir, name) -> name.endsWith(ONLINE_ARTIFACT_SUFFIX));
+        File[] files = onlineDir.listFiles((dir, name) ->
+                name.endsWith(ONLINE_ARTIFACT_SUFFIX)
+                        || name.endsWith(JANK_ARTIFACT_SUFFIX));
         File[] allFiles = onlineDir.listFiles();
         if (allFiles != null) {
             long now = System.currentTimeMillis();
@@ -966,6 +1193,8 @@ public class TraceManager {
         onlineConfig = null;
         onlineDir = null;
         onlineAppName = "";
+        onlineAppVersion = "";
+        onlineVersionCode = -1;
         onlineEnabled = false;
         onlineDumpBusy = false;
     }

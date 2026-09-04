@@ -35,7 +35,7 @@ public final class RheaTrace3 {
 
     public enum ExportRequestResult {
         ACCEPTED, NOT_INITIALIZED, DISABLED, INVALID_RANGE, FUTURE_RANGE,
-        EMPTY_RANGE, BUSY, STORAGE_UNAVAILABLE
+        EMPTY_RANGE, BUSY, STORAGE_UNAVAILABLE, INVALID_JANK_METADATA
     }
 
     public enum ExportStatus {
@@ -62,6 +62,10 @@ public final class RheaTrace3 {
         private final boolean enableRusage;
         private final boolean enableStackCaptureStats;
         private final String mappingId;
+        private final String anonymousDeviceId;
+        private final String buildId;
+        private final String environment;
+        private final String channel;
 
         private OnlineTraceConfig(Builder builder) {
             bufferSizeBytes = builder.bufferSizeBytes;
@@ -77,6 +81,10 @@ public final class RheaTrace3 {
             enableRusage = builder.enableRusage;
             enableStackCaptureStats = builder.enableStackCaptureStats;
             mappingId = builder.mappingId;
+            anonymousDeviceId = builder.anonymousDeviceId;
+            buildId = builder.buildId;
+            environment = builder.environment;
+            channel = builder.channel;
         }
 
         public int getBufferSizeBytes() { return bufferSizeBytes; }
@@ -92,6 +100,10 @@ public final class RheaTrace3 {
         public boolean isEnableRusage() { return enableRusage; }
         public boolean isEnableStackCaptureStats() { return enableStackCaptureStats; }
         public String getMappingId() { return mappingId; }
+        public String getAnonymousDeviceId() { return anonymousDeviceId; }
+        public String getBuildId() { return buildId; }
+        public String getEnvironment() { return environment; }
+        public String getChannel() { return channel; }
 
         public static Builder builder() { return new Builder(); }
 
@@ -109,6 +121,10 @@ public final class RheaTrace3 {
             private boolean enableRusage;
             private boolean enableStackCaptureStats;
             private String mappingId = "";
+            private String anonymousDeviceId = "";
+            private String buildId = "";
+            private String environment = "";
+            private String channel = "";
 
             public Builder setBufferSizeBytes(int value) {
                 bufferSizeBytes = value;
@@ -175,6 +191,26 @@ public final class RheaTrace3 {
                 return this;
             }
 
+            public Builder setAnonymousDeviceId(String value) {
+                anonymousDeviceId = value == null ? "" : value;
+                return this;
+            }
+
+            public Builder setBuildId(String value) {
+                buildId = value == null ? "" : value;
+                return this;
+            }
+
+            public Builder setEnvironment(String value) {
+                environment = value == null ? "" : value;
+                return this;
+            }
+
+            public Builder setChannel(String value) {
+                channel = value == null ? "" : value;
+                return this;
+            }
+
             public OnlineTraceConfig build() {
                 if (bufferSizeBytes < 1024 * 1024 || bufferSizeBytes > 16 * 1024 * 1024) {
                     throw new IllegalArgumentException(
@@ -191,7 +227,129 @@ public final class RheaTrace3 {
                 if (mappingId.length() > 128) {
                     throw new IllegalArgumentException("mappingId is too long");
                 }
+                validateOptionalString(anonymousDeviceId, 256, "anonymousDeviceId");
+                validateOptionalString(buildId, 256, "buildId");
+                validateOptionalString(environment, 64, "environment");
+                validateOptionalString(channel, 128, "channel");
                 return new OnlineTraceConfig(this);
+            }
+
+            private static void validateOptionalString(String value, int maxLength, String name) {
+                if (!value.isEmpty() && (value.trim().isEmpty() || value.length() > maxLength)) {
+                    throw new IllegalArgumentException(name + " is invalid");
+                }
+            }
+        }
+    }
+
+    /** 一次逻辑卡顿的不可变元数据；同一事件重试必须复用相同 eventId。 */
+    public static final class JankEvent {
+        private final String eventId;
+        private final long occurredAt;
+        private final String sessionId;
+        private final String scene;
+        private final long messageStartNs;
+        private final long messageEndNs;
+        private final long thresholdNs;
+        private final long attemptedSampleCount;
+
+        private JankEvent(Builder builder) {
+            eventId = builder.eventId;
+            occurredAt = builder.occurredAt;
+            sessionId = builder.sessionId;
+            scene = builder.scene;
+            messageStartNs = builder.messageStartNs;
+            messageEndNs = builder.messageEndNs;
+            thresholdNs = builder.thresholdNs;
+            attemptedSampleCount = builder.attemptedSampleCount;
+        }
+
+        public String getEventId() { return eventId; }
+        public long getOccurredAt() { return occurredAt; }
+        public String getSessionId() { return sessionId; }
+        public String getScene() { return scene; }
+        public long getMessageStartNs() { return messageStartNs; }
+        public long getMessageEndNs() { return messageEndNs; }
+        public long getThresholdNs() { return thresholdNs; }
+        public long getAttemptedSampleCount() { return attemptedSampleCount; }
+
+        public static Builder builder() { return new Builder(); }
+
+        public static final class Builder {
+            private String eventId = "";
+            private long occurredAt = -1;
+            private String sessionId = "";
+            private String scene = "";
+            private long messageStartNs = -1;
+            private long messageEndNs = -1;
+            private long thresholdNs = -1;
+            private long attemptedSampleCount = -1;
+
+            public Builder setEventId(String value) {
+                eventId = value == null ? "" : value;
+                return this;
+            }
+
+            public Builder setOccurredAt(long value) {
+                occurredAt = value;
+                return this;
+            }
+
+            public Builder setSessionId(String value) {
+                sessionId = value == null ? "" : value;
+                return this;
+            }
+
+            public Builder setScene(String value) {
+                scene = value == null ? "" : value;
+                return this;
+            }
+
+            public Builder setMessageStartNs(long value) {
+                messageStartNs = value;
+                return this;
+            }
+
+            public Builder setMessageEndNs(long value) {
+                messageEndNs = value;
+                return this;
+            }
+
+            public Builder setThresholdNs(long value) {
+                thresholdNs = value;
+                return this;
+            }
+
+            public Builder setAttemptedSampleCount(long value) {
+                attemptedSampleCount = value;
+                return this;
+            }
+
+            public JankEvent build() {
+                if (!eventId.matches("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")) {
+                    throw new IllegalArgumentException("eventId is invalid");
+                }
+                requireString(sessionId, 128, "sessionId");
+                requireString(scene, 128, "scene");
+                if (occurredAt <= 0) {
+                    throw new IllegalArgumentException("occurredAt must be positive");
+                }
+                if (messageStartNs < 0 || messageEndNs <= messageStartNs) {
+                    throw new IllegalArgumentException("message time range is invalid");
+                }
+                if (thresholdNs <= 0 || thresholdNs > messageEndNs - messageStartNs) {
+                    throw new IllegalArgumentException("thresholdNs is invalid");
+                }
+                if (attemptedSampleCount < 0) {
+                    throw new IllegalArgumentException("attemptedSampleCount must be non-negative");
+                }
+                return new JankEvent(this);
+            }
+
+            private static void requireString(String value, int maxLength, String name) {
+                if (value.trim().isEmpty() || value.length() > maxLength) {
+                    throw new IllegalArgumentException(name + " is invalid");
+                }
             }
         }
     }
@@ -303,6 +461,11 @@ public final class RheaTrace3 {
         return TraceManager.getInstance().exportAllStackData(callback);
     }
 
+    public static ExportRequestResult exportJankTrace(
+            JankEvent event, ExportCallback callback) {
+        return TraceManager.getInstance().exportJankTrace(event, callback);
+    }
+
     public static void setOnlineTracingEnabled(boolean enabled) {
         TraceManager.getInstance().setOnlineTracingEnabled(enabled);
     }
@@ -312,8 +475,17 @@ public final class RheaTrace3 {
         return files == null ? Collections.<File>emptyList() : files;
     }
 
+    public static List<File> getPendingJankFiles() {
+        List<File> files = TraceManager.getInstance().getPendingJankFiles();
+        return files == null ? Collections.<File>emptyList() : files;
+    }
+
     public static boolean deleteStackFile(File artifact) {
         return TraceManager.getInstance().deleteStackFile(artifact);
+    }
+
+    public static boolean deleteJankFile(File artifact) {
+        return TraceManager.getInstance().deleteJankFile(artifact);
     }
 
     public static void stopOnlineTracing() {

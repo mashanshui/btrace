@@ -15,8 +15,15 @@
 | `initOnline(Application, OnlineTraceConfig)` | 启动低损耗线上常驻采集 | API 26+、64 位 arm64、主进程；与调试模式互斥 |
 | `exportStackData(startNs, endNs, callback)` | 按 elapsed realtime 半开区间异步导出 | 不判断卡顿，不清空缓冲区；同一时刻只执行一个任务 |
 | `exportAllStackData(callback)` | 异步导出快照时全部有效记录 | RingBuffer 已覆盖的数据无法恢复 |
+| `exportJankTrace(event, callback)` | 导出单次卡顿的 manifest v3 产物 | 业务方提供事件、会话、场景、消息边界、阈值和尝试采样次数 |
 
 noop 制品保留相同类和方法签名，方法体为空。业务代码只依赖 `RheaTrace3`，不应直接使用 `TraceManager`、`TraceProperties` 或 `trace.*` 包。
+
+### 卡顿元数据
+
+卡顿导出不会改变通用堆栈导出协议。初始化时通过 `OnlineTraceConfig` 设置匿名设备 ID、构建 ID、环境和渠道；每次卡顿使用不可变 `JankEvent` 冻结 `eventId`、发生时间、会话、场景、消息边界、阈值和 `attemptedSampleCount`。SDK 从 Android 应用与系统信息中补充包名、版本、系统版本、设备型号、PID 和实际最小采样间隔。
+
+`eventId` 必须由调用方在确认逻辑卡顿时生成并在重试中复用。重试应读取 `getPendingJankFiles()` 返回的既有 ZIP，而不是重新构造事件；成功上传后使用 `deleteJankFile()` 删除。卡顿 ZIP 使用最新的 manifest v3 契约；上传时应遵循服务端的卡顿产物接口，SDK 本身只负责生成、校验和枚举本地文件。
 
 ### 初始化和主进程判断
 

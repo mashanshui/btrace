@@ -65,6 +65,9 @@
 | 类 | 职责 | 主要上游 → 下游/扩展点 |
 | --- | --- | --- |
 | [`SamplingTraceDecoder`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/trace/SamplingTraceDecoder.java) | 读取 sampling/mapping/extra，组织解码和 retrace | Capture → MappingDecoder/StackList/Convertor |
+| [`StackParser`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/stack/StackParser.java) | 定义服务端上传流到完整堆栈 JSON 的公共接口 | Java 服务 → StackAnalyzer |
+| [`StackAnalyzer`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/stack/StackAnalyzer.java) | 校验并解析线上产物，生成时间明细和聚合调用树 | CLI/StackParser → StackArtifact/SamplingTraceDecoder |
+| [`StackArtifact`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/stack/StackArtifact.java) | 限制并校验线上堆栈 ZIP，管理安全解包目录 | StackAnalyzer → manifest/sampling 文件 |
 | [`SamplingMappingDecoder`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/trace/SamplingMappingDecoder.java) | 解码方法指针符号和线程名 | SamplingTraceDecoder → MethodSymbol |
 | [`ProguardMappingDecoder`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/trace/ProguardMappingDecoder.java) | 解析 R8/ProGuard mapping 并还原方法签名 | SamplingTraceDecoder → MappingClass/Method 内部模型 |
 | [`StackList`](../rhea-tool/rhea-trace-processor/src/main/java/com/bytedance/rheatrace/trace/StackList.java) | 按格式版本解码单条采样记录和堆栈 | SamplingTraceDecoder → MethodSymbol/CallNode |

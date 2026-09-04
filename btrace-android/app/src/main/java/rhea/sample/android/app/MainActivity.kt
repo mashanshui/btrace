@@ -22,7 +22,6 @@ import android.view.Menu
 import android.view.MenuItem
 import androidx.appcompat.app.AppCompatActivity
 import com.bytedance.rheatrace.RheaTrace3
-import com.bytedance.rheatrace.RheaTrace3.exportStackData
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.google.android.material.snackbar.Snackbar
 import rhea.sample.android.R
@@ -45,11 +44,21 @@ class MainActivity : AppCompatActivity() {
                 if (endNs > messageStartNs + 100000000) {
                     Log.e(TAG, "onMessageEnd: ")
                     RheaTrace3.captureStackTrace(false)
-                    val exportStackData =
-                        RheaTrace3.exportStackData(messageStartNs, endNs, RheaTrace3.ExportCallback { result: RheaTrace3.ExportResult? ->
+                    val event = RheaTrace3.JankEvent.builder()
+                        .setEventId("demo-jank-$endNs")
+                        .setOccurredAt(System.currentTimeMillis())
+                        .setSessionId("demo-session")
+                        .setScene("main_activity")
+                        .setMessageStartNs(messageStartNs)
+                        .setMessageEndNs(endNs)
+                        .setThresholdNs(100_000_000L)
+                        .setAttemptedSampleCount(1)
+                        .build()
+                    val exportJankTrace =
+                        RheaTrace3.exportJankTrace(event, RheaTrace3.ExportCallback { result: RheaTrace3.ExportResult? ->
                             Log.e(TAG, "onMessageEnd: " + result?.artifact?.path)
                         })
-                    Log.e(TAG, "onMessageEnd: "+exportStackData.name)
+                    Log.e(TAG, "onMessageEnd: "+exportJankTrace.name)
                 }
             }
         })

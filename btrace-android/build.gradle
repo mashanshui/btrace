@@ -60,6 +60,7 @@ tasks.register('verifyKnowledgeBase') {
                 'app-sdk.md',
                 'native-runtime.md',
                 'cli-processor.md',
+                'server-stack-parser-integration.md',
                 'protocol-and-data-formats.md',
                 'configuration-reference.md',
                 'source-reference.md',

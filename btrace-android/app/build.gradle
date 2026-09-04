@@ -89,7 +89,7 @@ tasks.register('parseOnlineStackFlow') {
         if (!inputDir.exists()) {
             inputDir.mkdirs()
         }
-        ['range', 'all'].each { String kind ->
+        ['range', 'all', 'jank'].each { String kind ->
             delete(new File(onlineStackFlowDir, kind))
         }
 
@@ -102,11 +102,16 @@ tasks.register('parseOnlineStackFlow') {
         }
         String remoteDir = '/sdcard/Android/data/rhea.sample.android/files/' +
                 'rhea-online-stack-test'
-        ['range', 'all'].each { String kind ->
-            File local = new File(inputDir, "${kind}.rheatrace.zip")
+        Map<String, String> artifacts = [
+                range: 'range.rheatrace.zip',
+                all  : 'all.rheatrace.zip',
+                jank : 'jank.rheajank.zip'
+        ]
+        artifacts.each { String kind, String artifactName ->
+            File local = new File(inputDir, artifactName)
             exec {
                 commandLine(([adb] + adbPrefix + ['pull',
-                        "${remoteDir}/${kind}.rheatrace.zip", local.absolutePath]) as String[])
+                        "${remoteDir}/${artifactName}", local.absolutePath]) as String[])
             }
             if (!local.isFile() || local.length() == 0) {
                 throw new GradleException("未拉取到 ${kind} 堆栈产物：${local}")
@@ -117,8 +122,8 @@ tasks.register('parseOnlineStackFlow') {
         if (!jar.isFile()) {
             throw new GradleException("未找到 Processor JAR：${jar}")
         }
-        ['range', 'all'].each { String kind ->
-            File input = new File(inputDir, "${kind}.rheatrace.zip")
+        artifacts.each { String kind, String artifactName ->
+            File input = new File(inputDir, artifactName)
             File output = new File(onlineStackFlowDir, kind)
             output.mkdirs()
             exec {

@@ -76,20 +76,20 @@ adb install -r app\build\outputs\apk\debug\app-debug.apk
 Windows 上建议显式指定采集时长：
 
 ```powershell
-java -jar rhea-trace-processor-3.0.0.jar -a rhea.sample.android -t 10 -o output.pb -r sched
+java -jar rhea-trace-processor-1.0.1.jar -a rhea.sample.android -t 10 -o output.pb -r sched
 ```
 
 常用变化：
 
 ```powershell
 # 指定设备
-java -jar rhea-trace-processor-3.0.0.jar -s SERIAL -a rhea.sample.android -t 10 -o output.pb sched
+java -jar rhea-trace-processor-1.0.1.jar -s SERIAL -a rhea.sample.android -t 10 -o output.pb sched
 
 # Release 包解混淆
-java -jar rhea-trace-processor-3.0.0.jar -a your.package -t 10 -m mapping.txt -o output.pb sched
+java -jar rhea-trace-processor-1.0.1.jar -a your.package -t 10 -m mapping.txt -o output.pb sched
 
 # 仅采集 App 数据，绕过 Perfetto 系统采集
-java -jar rhea-trace-processor-3.0.0.jar -a your.package -t 10 -mode simple -o output.pb
+java -jar rhea-trace-processor-1.0.1.jar -a your.package -t 10 -mode simple -o output.pb
 ```
 
 CLI 会设置临时系统属性、建立 ADB 端口转发、控制 App 采集、下载数据、解析堆栈并输出 Perfetto Trace。退出时会清理端口转发、App 临时文件和临时系统属性。

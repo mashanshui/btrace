@@ -22,6 +22,8 @@ String callTreeJson = new StackAnalyzer().analyzeCallTree(request);
 
 `analyze-stack` 在一次采样解码中同时生成完整 JSON 和调用树 JSON；独立 API 会跳过 Perfetto Trace 构建，但仍执行相同的格式校验、mapping retrace、时间裁剪和估算规则。
 
+服务端需要直接接收上传流并返回同时包含 `segments` 和 `callTree` 的完整报告时，v1 可使用 `StackParser.parse(InputStream, File)`；v3 卡顿产物推荐使用 `parseWithMappingResolver`，在校验 manifest 后按 `buildId` 选择 mapping，完整报告会附带 `sourceManifest`。两条路径均跳过 Perfetto Trace 构建。接口生命周期、大小限制、Spring Boot 适配和 JSON 字段说明见[服务端堆栈解析接入](server-stack-parser-integration.md)。
+
 ### 入口流程
 
 `Main.main` 的执行顺序是：
@@ -120,6 +122,7 @@ CLI 捕获顶层异常并打印 `TraceError.prompt`，当前不会重新抛出�
 ## 相关文档
 
 - [快速开始](getting-started.md)
+- [服务端堆栈解析接入](server-stack-parser-integration.md)
 - [协议与数据格式](protocol-and-data-formats.md)
 - [配置参考](configuration-reference.md)
 - [排障指南](troubleshooting.md)

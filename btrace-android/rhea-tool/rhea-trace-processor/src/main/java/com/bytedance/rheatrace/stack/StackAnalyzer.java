@@ -15,8 +15,11 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.BufferedOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -28,7 +31,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /** 将通用线上堆栈产物解析为时间段列表和前缀合并调用树。 */
-public final class StackAnalyzer {
+public final class StackAnalyzer implements StackParser {
 
     private static final long DEFAULT_SAMPLE_INTERVAL_NS = 10_000_000L;
     private static final int ESTIMATE_CAP_MULTIPLIER = 2;
@@ -197,6 +200,102 @@ public final class StackAnalyzer {
         }
     }
 
+    /**
+     * 将服务端上传流解析为完整报告 JSON，不构建 Perfetto Trace。
+     * 调用方负责关闭输入流。
+     */
+    @Override
+    public String parse(InputStream artifactInput, File proguardMapping) throws IOException {
+        return parseUploadedArtifact(artifactInput, proguardMapping, null);
+    }
+
+    /**
+     * 在 manifest 完成校验后选择 mapping，避免服务端为了读取卡顿产物 buildId 而重复解包。
+     */
+    @Override
+    public String parseWithMappingResolver(InputStream artifactInput,
+                                           StackMappingResolver mappingResolver)
+            throws IOException {
+        return parseUploadedArtifactWithMappingResolver(
+                artifactInput, mappingResolver, null);
+    }
+
+    /** 允许测试指定隔离的临时目录，生产调用始终使用系统临时目录。 */
+    String parseUploadedArtifact(InputStream artifactInput, File proguardMapping,
+                                 File temporaryDirectory) throws IOException {
+        validateMappingFile(proguardMapping);
+        return parseUploadedArtifactInternal(artifactInput,
+                metadata -> proguardMapping, temporaryDirectory);
+    }
+
+    /** 允许测试指定隔离的临时目录，生产调用始终使用系统临时目录。 */
+    String parseUploadedArtifactWithMappingResolver(InputStream artifactInput,
+                                                    StackMappingResolver mappingResolver,
+                                                    File temporaryDirectory)
+            throws IOException {
+        if (artifactInput == null) {
+            throw new IllegalArgumentException("artifactInput == null");
+        }
+        if (mappingResolver == null) {
+            throw new IllegalArgumentException("mappingResolver == null");
+        }
+        return parseUploadedArtifactInternal(artifactInput, mappingResolver,
+                temporaryDirectory);
+    }
+
+    private String parseUploadedArtifactInternal(InputStream artifactInput,
+                                                 StackMappingResolver mappingResolver,
+                                                 File temporaryDirectory)
+            throws IOException {
+        if (artifactInput == null) {
+            throw new IllegalArgumentException("artifactInput == null");
+        }
+        if (temporaryDirectory != null && !temporaryDirectory.isDirectory()) {
+            throw new IOException("临时目录不存在或不是目录: " + temporaryDirectory);
+        }
+        File upload = File.createTempFile(
+                "rhea-stack-upload-", ".rheatrace.zip", temporaryDirectory);
+        try {
+            copyUploadedArtifact(artifactInput, upload);
+            StackAnalysisRequest request = StackAnalysisRequest.builder(upload).build();
+            ParsedAnalysis parsed = parse(request, false, mappingResolver);
+            try {
+                return buildReport(parsed.data, request).toString(2);
+            } catch (JSONException e) {
+                throw new IOException("生成堆栈报告失败", e);
+            }
+        } finally {
+            if (!upload.delete() && upload.exists()) {
+                upload.deleteOnExit();
+            }
+        }
+    }
+
+    private static void validateMappingFile(File proguardMapping) throws IOException {
+        if (proguardMapping != null && !proguardMapping.isFile()) {
+            throw new IOException("ProGuard/R8 mapping 文件不存在或不是文件: "
+                    + proguardMapping);
+        }
+    }
+
+    private static void copyUploadedArtifact(InputStream source, File target)
+            throws IOException {
+        long total = 0;
+        byte[] buffer = new byte[8192];
+        try (BufferedOutputStream output = new BufferedOutputStream(
+                new FileOutputStream(target))) {
+            int count;
+            while ((count = source.read(buffer)) != -1) {
+                if (total > StackArtifact.MAX_TOTAL_BYTES - count) {
+                    throw new IOException("堆栈产物超过大小限制: "
+                            + StackArtifact.MAX_TOTAL_BYTES);
+                }
+                output.write(buffer, 0, count);
+                total += count;
+            }
+        }
+    }
+
     /** 只解析并返回聚合调用树 JSON，不构建 Perfetto Trace。 */
     public String analyzeCallTree(StackAnalysisRequest request) throws IOException {
         ParsedAnalysis parsed = parse(request, false);
@@ -219,16 +318,33 @@ public final class StackAnalyzer {
 
     private ParsedAnalysis parse(StackAnalysisRequest request, boolean buildTrace)
             throws IOException {
+        return parse(request, buildTrace, null);
+    }
+
+    private ParsedAnalysis parse(StackAnalysisRequest request, boolean buildTrace,
+                                 StackMappingResolver mappingResolver)
+            throws IOException {
         try (StackArtifact artifact = StackArtifact.open(request.getInput())) {
             JSONObject manifest = artifact.getManifest();
-            String appName = manifest.optString("appName", "online");
+            boolean jankArtifact = isJankArtifact(manifest);
+            String appName = jankArtifact
+                    ? manifest.optString("packageName", "online")
+                    : manifest.optString("appName", "online");
+            File proguardMapping = request.getProguardMapping();
+            if (mappingResolver != null) {
+                StackArtifactMetadata metadata = metadataFromManifest(manifest);
+                proguardMapping = mappingResolver.resolve(metadata);
+                validateMappingFile(proguardMapping);
+            }
             SamplingTraceDecoder.DecodedSampling decoded = SamplingTraceDecoder.decodeDetailed(
                     artifact.getSamplingFile(), artifact.getMappingFile(), appName,
-                    request.getProguardMapping(), buildTrace);
-            if (decoded.getFormatVersion() != manifest.getInt("samplingFormatVersion")) {
+                    proguardMapping, buildTrace);
+            int expectedFormatVersion = jankArtifact
+                    ? 5 : manifest.getInt("samplingFormatVersion");
+            if (decoded.getFormatVersion() != expectedFormatVersion) {
                 throw new IOException("manifest 与 sampling 格式版本不一致");
             }
-            if (decoded.getRawRecordCount() != manifest.getInt("recordCount")) {
+            if (!jankArtifact && decoded.getRawRecordCount() != manifest.getInt("recordCount")) {
                 throw new IOException("manifest 与 sampling 记录数不一致");
             }
             return new ParsedAnalysis(buildAnalysisData(manifest, decoded),
@@ -238,11 +354,26 @@ public final class StackAnalyzer {
         }
     }
 
+    private static StackArtifactMetadata metadataFromManifest(JSONObject manifest)
+            throws JSONException {
+        boolean jankArtifact = isJankArtifact(manifest);
+        int schemaVersion = manifest.getInt("schemaVersion");
+        String artifactType = manifest.getString("artifactType");
+        String normalizedAppId = jankArtifact
+                ? manifest.optString("packageName", "")
+                : manifest.optString("appName", "");
+        String mappingId = jankArtifact
+                ? manifest.optString("buildId", "")
+                : manifest.optString("mappingId", "");
+        return new StackArtifactMetadata(schemaVersion, artifactType, normalizedAppId, mappingId);
+    }
+
     private AnalysisData buildAnalysisData(JSONObject manifest,
                                            SamplingTraceDecoder.DecodedSampling decoded)
             throws JSONException {
-        long windowStart = manifest.getLong("actualStartNs");
-        long windowEnd = manifest.getLong("actualEndNs");
+        boolean jankArtifact = isJankArtifact(manifest);
+        long windowStart = manifest.getLong(jankArtifact ? "messageStartNs" : "actualStartNs");
+        long windowEnd = manifest.getLong(jankArtifact ? "messageEndNs" : "actualEndNs");
         long configuredInterval = manifest.optLong("minSampleIntervalNs", 0);
         boolean intervalFromManifest = configuredInterval > 0;
         long nominalInterval = intervalFromManifest
@@ -357,6 +488,10 @@ public final class StackAnalyzer {
             threadJson.put(threadToJson(thread, data.windowStart, ids));
         }
         JSONObject report = buildCommonReport(data, "RHEA_STACK_REPORT");
+        if (isJankArtifact(data.manifest)) {
+            // StackArtifact 已经严格校验卡顿字段，复制后再挂到报告中，避免把内部对象暴露给调用方。
+            report.put("sourceManifest", new JSONObject(data.manifest.toString()));
+        }
         report.put("renderDefaults", new JSONObject()
                 .put("thread", request.getThread())
                 .put("sort", request.getSort())
@@ -382,15 +517,20 @@ public final class StackAnalyzer {
     private static JSONObject buildCommonReport(AnalysisData data, String artifactType)
             throws JSONException {
         JSONObject manifest = data.manifest;
+        boolean jankArtifact = isJankArtifact(manifest);
         JSONObject report = new JSONObject();
         report.put("schemaVersion", 1);
         report.put("artifactType", artifactType);
-        report.put("selectionType", manifest.getString("selectionType"));
-        report.put("appName", manifest.optString("appName", ""));
-        report.put("mappingId", manifest.optString("mappingId", ""));
+        report.put("selectionType", jankArtifact ? "RANGE" : manifest.getString("selectionType"));
+        report.put("appName", jankArtifact
+                ? manifest.optString("packageName", "") : manifest.optString("appName", ""));
+        report.put("mappingId", jankArtifact
+                ? manifest.optString("buildId", "") : manifest.optString("mappingId", ""));
         report.put("processId", data.processId);
-        report.put("requestedStartNs", manifest.opt("requestedStartNs"));
-        report.put("requestedEndNs", manifest.opt("requestedEndNs"));
+        report.put("requestedStartNs", jankArtifact
+                ? manifest.opt("messageStartNs") : manifest.opt("requestedStartNs"));
+        report.put("requestedEndNs", jankArtifact
+                ? manifest.opt("messageEndNs") : manifest.opt("requestedEndNs"));
         report.put("availableStartNs", manifest.optLong("availableStartNs", data.windowStart));
         report.put("availableEndNs", manifest.optLong("availableEndNs", data.windowEnd));
         report.put("actualStartNs", data.windowStart);
@@ -412,6 +552,11 @@ public final class StackAnalyzer {
                 .put("pointSampleDuration", JSONObject.NULL)
                 .put("pointSamplesContinuous", false));
         return report;
+    }
+
+    private static boolean isJankArtifact(JSONObject manifest) {
+        return manifest.optInt("schemaVersion", -1) == 3
+                && "RHEA_JANK".equals(manifest.optString("artifactType", ""));
     }
 
     private static JSONObject threadToJson(ThreadData thread, long windowStart, int[] ids)

@@ -22,9 +22,12 @@ import org.json.JSONObject;
 import org.junit.Assert;
 import org.junit.Test;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -34,6 +37,11 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -340,6 +348,306 @@ public class StackAnalyzerTest {
     }
 
     @Test
+    public void streamParserReturnsFullReportAndDoesNotCloseCallerInput() throws Exception {
+        File artifact = createArtifact(1000, 100, 300,
+                Arrays.asList(Record.point(150, 1000, "A", "B")),
+                mapOf("A", 1L, "B", 2L));
+        File temporaryDirectory = java.nio.file.Files.createTempDirectory(
+                "rhea-stack-parser-test-").toFile();
+        CloseTrackingInputStream input = new CloseTrackingInputStream(
+                java.nio.file.Files.readAllBytes(artifact.toPath()));
+        try {
+            JSONObject expected = new StackAnalyzer().analyze(artifact, null).getReport();
+            StackAnalyzer parser = new StackAnalyzer();
+            JSONObject actual = new JSONObject(parser.parseUploadedArtifact(
+                    input, null, temporaryDirectory));
+
+            Assert.assertTrue(expected.similar(actual));
+            Assert.assertEquals("RHEA_STACK_REPORT", actual.getString("artifactType"));
+            JSONObject thread = actual.getJSONArray("threads").getJSONObject(0);
+            Assert.assertTrue(thread.has("segments"));
+            Assert.assertTrue(thread.has("callTree"));
+            Assert.assertFalse(input.closed);
+            assertDirectoryEmpty(temporaryDirectory);
+        } finally {
+            input.close();
+            Assert.assertTrue(artifact.delete());
+            Assert.assertTrue(temporaryDirectory.delete());
+        }
+    }
+
+    @Test
+    public void streamParserUsesOptionalProguardMapping() throws Exception {
+        File artifact = createArtifact(1000, 100, 300,
+                Arrays.asList(Record.point(150, 1000, "void a.b.a()")),
+                mapOf("void a.b.a()", 1L));
+        File proguardMapping = File.createTempFile("rhea-stack-proguard", ".txt");
+        try {
+            java.nio.file.Files.write(proguardMapping.toPath(), (
+                    "com.example.RealClass -> a.b:\n"
+                            + "    void work() -> a\n").getBytes(StandardCharsets.UTF_8));
+            StackParser parser = new StackAnalyzer();
+            JSONObject report;
+            try (InputStream input = new java.io.FileInputStream(artifact)) {
+                report = new JSONObject(parser.parse(input, proguardMapping));
+            }
+            JSONObject root = report.getJSONArray("threads").getJSONObject(0)
+                    .getJSONArray("callTree").getJSONObject(0);
+            Assert.assertEquals("com.example.RealClass.work()", root.getString("method"));
+            Assert.assertTrue(proguardMapping.isFile());
+        } finally {
+            Assert.assertTrue(artifact.delete());
+            Assert.assertTrue(proguardMapping.delete());
+        }
+    }
+
+    @Test
+    public void streamParserResolvesV3BuildIdAfterValidationAndPreservesSourceManifest()
+            throws Exception {
+        long start = 9_007_199_254_740_992L;
+        File artifact = createJankArtifact(1000, start, start + 300,
+                Arrays.asList(Record.point(start + 150, 1000, "void a.b.a()")),
+                mapOf("void a.b.a()", 1L));
+        File proguardMapping = File.createTempFile("rhea-stack-proguard-resolver", ".txt");
+        File temporaryDirectory = java.nio.file.Files.createTempDirectory(
+                "rhea-stack-parser-resolver-").toFile();
+        java.nio.file.Files.write(proguardMapping.toPath(), (
+                "com.example.RealClass -> a.b:\n"
+                        + "    void work() -> a\n").getBytes(StandardCharsets.UTF_8));
+        byte[] upload = java.nio.file.Files.readAllBytes(artifact.toPath());
+        CloseTrackingInputStream input = new CloseTrackingInputStream(upload);
+        AtomicInteger calls = new AtomicInteger();
+        try {
+            StackAnalyzer parser = new StackAnalyzer();
+            JSONObject report = new JSONObject(parser.parseUploadedArtifactWithMappingResolver(
+                    input, metadata -> {
+                        Assert.assertEquals(3, metadata.getSchemaVersion());
+                        Assert.assertEquals("RHEA_JANK", metadata.getArtifactType());
+                        Assert.assertEquals("com.example.app", metadata.getAppId());
+                        Assert.assertEquals("release-1", metadata.getMappingId());
+                        calls.incrementAndGet();
+                        return proguardMapping;
+                    }, temporaryDirectory));
+
+            Assert.assertEquals(1, calls.get());
+            Assert.assertFalse(input.closed);
+            Assert.assertTrue(proguardMapping.isFile());
+            Assert.assertEquals(start,
+                    report.getJSONObject("sourceManifest").getLong("messageStartNs"));
+            Assert.assertEquals(start + 300,
+                    report.getJSONObject("sourceManifest").getLong("messageEndNs"));
+            Assert.assertEquals("release-1",
+                    report.getJSONObject("sourceManifest").getString("buildId"));
+            Assert.assertEquals(22, report.getJSONObject("sourceManifest").length());
+            // sourceManifest is the complete v3 object; verify the nested file metadata too.
+            JSONObject sourceManifest = report.getJSONObject("sourceManifest");
+            for (String key : new String[]{
+                    "schemaVersion", "artifactType", "eventId", "occurredAt", "sessionId",
+                    "anonymousDeviceId", "packageName", "appVersion", "versionCode", "buildId",
+                    "environment", "channel", "osVersion", "deviceModel", "scene",
+                    "messageStartNs", "messageEndNs", "thresholdNs", "minSampleIntervalNs",
+                    "attemptedSampleCount", "processId", "files"}) {
+                Assert.assertTrue("missing sourceManifest field: " + key,
+                        sourceManifest.has(key));
+            }
+            Assert.assertTrue(sourceManifest.getJSONObject("files")
+                    .getJSONObject("sampling").getLong("size") > 0);
+            Assert.assertEquals(64, sourceManifest.getJSONObject("files")
+                    .getJSONObject("sampling").getString("sha256").length());
+            JSONObject root = report.getJSONArray("threads").getJSONObject(0)
+                    .getJSONArray("callTree").getJSONObject(0);
+            Assert.assertEquals("com.example.RealClass.work()", root.getString("method"));
+            assertDirectoryEmpty(temporaryDirectory);
+        } finally {
+            input.close();
+            Assert.assertTrue(artifact.delete());
+            Assert.assertTrue(proguardMapping.delete());
+            Assert.assertTrue(temporaryDirectory.delete());
+        }
+    }
+
+    @Test
+    public void streamParserMappingResolverIsNotCalledForInvalidArtifact() throws Exception {
+        File temporaryDirectory = java.nio.file.Files.createTempDirectory(
+                "rhea-stack-parser-resolver-failure-").toFile();
+        AtomicInteger calls = new AtomicInteger();
+        try {
+            try {
+                new StackAnalyzer().parseUploadedArtifactWithMappingResolver(
+                        new ByteArrayInputStream("not-a-zip".getBytes(StandardCharsets.UTF_8)),
+                        metadata -> {
+                            calls.incrementAndGet();
+                            return null;
+                        }, temporaryDirectory);
+                Assert.fail("invalid ZIP should be rejected");
+            } catch (IOException expected) {
+                Assert.assertNotNull(expected.getMessage());
+            }
+            Assert.assertEquals(0, calls.get());
+            assertDirectoryEmpty(temporaryDirectory);
+        } finally {
+            Assert.assertTrue(temporaryDirectory.delete());
+        }
+    }
+
+    @Test
+    public void streamParserMappingResolverUsesV1MappingId() throws Exception {
+        File artifact = createArtifact(1000, 100, 300,
+                Arrays.asList(Record.point(150, 1000, "A")), mapOf("A", 1L));
+        AtomicInteger calls = new AtomicInteger();
+        try (InputStream input = new java.io.FileInputStream(artifact)) {
+            JSONObject report = new JSONObject(new StackAnalyzer().parseWithMappingResolver(
+                    input, metadata -> {
+                        Assert.assertEquals(1, metadata.getSchemaVersion());
+                        Assert.assertEquals("RHEA_STACK", metadata.getArtifactType());
+                        Assert.assertEquals("app", metadata.getAppId());
+                        Assert.assertEquals("mapping-1", metadata.getMappingId());
+                        calls.incrementAndGet();
+                        return null;
+                    }));
+            Assert.assertEquals(1, calls.get());
+            Assert.assertFalse(report.has("sourceManifest"));
+        } finally {
+            Assert.assertTrue(artifact.delete());
+        }
+    }
+
+    @Test
+    public void streamParserMappingResolverSupportsNullAndPropagatesFailures() throws Exception {
+        File artifact = createJankArtifact(1000, 100, 400,
+                Arrays.asList(Record.point(150, 1000, "A")), mapOf("A", 1L));
+        byte[] upload = java.nio.file.Files.readAllBytes(artifact.toPath());
+        try {
+            JSONObject withoutMapping = new JSONObject(new StackAnalyzer()
+                    .parseWithMappingResolver(new ByteArrayInputStream(upload), metadata -> null));
+            Assert.assertEquals("A", withoutMapping.getJSONArray("threads").getJSONObject(0)
+                    .getJSONArray("callTree").getJSONObject(0).getString("method"));
+
+            try {
+                new StackAnalyzer().parseWithMappingResolver(
+                        new ByteArrayInputStream(upload), metadata -> {
+                            throw new IOException("mapping registry unavailable");
+                        });
+                Assert.fail("resolver IOException should propagate");
+            } catch (IOException expected) {
+                Assert.assertTrue(expected.getMessage().contains("mapping registry"));
+            }
+
+            try {
+                new StackAnalyzer().parseWithMappingResolver(
+                        new ByteArrayInputStream(upload),
+                        metadata -> new File("rhea-missing-resolved-mapping-" + System.nanoTime()));
+                Assert.fail("unreadable mapping should be rejected");
+            } catch (IOException expected) {
+                Assert.assertTrue(expected.getMessage().contains("mapping"));
+            }
+        } finally {
+            Assert.assertTrue(artifact.delete());
+        }
+    }
+
+    @Test
+    public void streamParserCleansTemporaryFileWhenParsingFails() throws Exception {
+        File temporaryDirectory = java.nio.file.Files.createTempDirectory(
+                "rhea-stack-parser-failure-").toFile();
+        try {
+            try {
+                new StackAnalyzer().parseUploadedArtifact(
+                        new ByteArrayInputStream("not-a-zip".getBytes(StandardCharsets.UTF_8)),
+                        null, temporaryDirectory);
+                Assert.fail("invalid ZIP should be rejected");
+            } catch (IOException expected) {
+                Assert.assertNotNull(expected.getMessage());
+            }
+            assertDirectoryEmpty(temporaryDirectory);
+        } finally {
+            Assert.assertTrue(temporaryDirectory.delete());
+        }
+    }
+
+    @Test
+    public void streamParserRejectsNullAndOversizeInput() throws Exception {
+        StackParser parser = new StackAnalyzer();
+        try {
+            parser.parse(null);
+            Assert.fail("null input should be rejected");
+        } catch (IllegalArgumentException expected) {
+            Assert.assertTrue(expected.getMessage().contains("artifactInput"));
+        }
+
+        try {
+            parser.parse(new FixedLengthInputStream(StackArtifact.MAX_TOTAL_BYTES + 1));
+            Assert.fail("oversize input should be rejected");
+        } catch (IOException expected) {
+            Assert.assertTrue(expected.getMessage().contains("超过大小限制"));
+        }
+    }
+
+    @Test
+    public void streamParserReportsMissingMappingAsIoFailure() throws Exception {
+        File missing = new File(System.getProperty("java.io.tmpdir"),
+                "rhea-missing-mapping-" + System.nanoTime() + ".txt");
+        try {
+            new StackAnalyzer().parse(new ByteArrayInputStream(new byte[0]), missing);
+            Assert.fail("missing mapping should be rejected");
+        } catch (IOException expected) {
+            Assert.assertTrue(expected.getMessage().contains("mapping"));
+        }
+    }
+
+    @Test
+    public void streamParserSupportsConcurrentRequests() throws Exception {
+        File artifact = createArtifact(1000, 100, 300,
+                Arrays.asList(Record.point(150, 1000, "A")), mapOf("A", 1L));
+        byte[] upload = java.nio.file.Files.readAllBytes(artifact.toPath());
+        StackParser parser = new StackAnalyzer();
+        ExecutorService executor = Executors.newFixedThreadPool(4);
+        List<Future<String>> results = new ArrayList<>();
+        try {
+            for (int i = 0; i < 8; i++) {
+                results.add(executor.submit(new Callable<String>() {
+                    @Override
+                    public String call() throws Exception {
+                        return parser.parse(new ByteArrayInputStream(upload));
+                    }
+                }));
+            }
+            for (Future<String> result : results) {
+                JSONObject report = new JSONObject(result.get());
+                Assert.assertEquals("RHEA_STACK_REPORT", report.getString("artifactType"));
+                Assert.assertEquals("A", report.getJSONArray("threads").getJSONObject(0)
+                        .getJSONArray("callTree").getJSONObject(0).getString("method"));
+            }
+        } finally {
+            executor.shutdownNow();
+            Assert.assertTrue(artifact.delete());
+        }
+    }
+
+    @Test
+    public void analyzesJankV3WithCompatibleReportFields() throws Exception {
+        File artifact = createJankArtifact(1000, 100, 400,
+                Arrays.asList(Record.point(150, 1000, "A", "B")),
+                mapOf("A", 1L, "B", 2L));
+        try {
+            JSONObject report = new StackAnalyzer().analyze(artifact, null).getReport();
+            Assert.assertEquals("RANGE", report.getString("selectionType"));
+            Assert.assertEquals("com.example.app", report.getString("appName"));
+            Assert.assertEquals("release-1", report.getString("mappingId"));
+            Assert.assertEquals(100L, report.getLong("requestedStartNs"));
+            Assert.assertEquals(400L, report.getLong("requestedEndNs"));
+            Assert.assertEquals("A", report.getJSONArray("threads").getJSONObject(0)
+                    .getJSONArray("callTree").getJSONObject(0).getString("method"));
+            Assert.assertTrue(report.has("sourceManifest"));
+            JSONObject callTree = new JSONObject(new StackAnalyzer()
+                    .analyzeCallTree(artifact, null));
+            Assert.assertFalse(callTree.has("sourceManifest"));
+        } finally {
+            Assert.assertTrue(artifact.delete());
+        }
+    }
+
+    @Test
     public void samplingDecoderRejectsInvalidMagic() throws Exception {
         Map<String, Long> mapping = mapOf("A", 1L);
         byte[] samplingBytes = encodeSampling(1000,
@@ -421,6 +729,7 @@ public class StackAnalyzerTest {
                 .put("actualEndNs", eventEnd)
                 .put("recordCount", records.size())
                 .put("appName", "app")
+                .put("mappingId", "mapping-1")
                 .put("processId", processId)
                 .put("files", new JSONObject()
                         .put("sampling", fileInfo(sampling))
@@ -428,6 +737,45 @@ public class StackAnalyzerTest {
         if (minSampleIntervalNs != null) {
             manifest.put("minSampleIntervalNs", minSampleIntervalNs);
         }
+        try (ZipOutputStream zip = new ZipOutputStream(new FileOutputStream(artifact))) {
+            put(zip, "manifest.json", manifest.toString().getBytes(StandardCharsets.UTF_8));
+            put(zip, "sampling.bin", sampling);
+            put(zip, "sampling-mapping.bin", mappingBytes);
+        }
+        return artifact;
+    }
+
+    private static File createJankArtifact(int processId, long eventStart, long eventEnd,
+                                           List<Record> records,
+                                           Map<String, Long> mapping) throws Exception {
+        File artifact = File.createTempFile("rhea-jank-analysis", ".zip");
+        byte[] sampling = encodeSampling(processId, records, mapping);
+        byte[] mappingBytes = encodeMapping(mapping, 1000, "main");
+        JSONObject manifest = new JSONObject()
+                .put("schemaVersion", 3)
+                .put("artifactType", "RHEA_JANK")
+                .put("eventId", "jank-1")
+                .put("occurredAt", 1000L)
+                .put("sessionId", "session-1")
+                .put("anonymousDeviceId", "device-anonymous")
+                .put("packageName", "com.example.app")
+                .put("appVersion", "1.0")
+                .put("versionCode", 1L)
+                .put("buildId", "release-1")
+                .put("environment", "production")
+                .put("channel", "official")
+                .put("osVersion", "15")
+                .put("deviceModel", "Pixel")
+                .put("scene", "home")
+                .put("messageStartNs", eventStart)
+                .put("messageEndNs", eventEnd)
+                .put("thresholdNs", 100L)
+                .put("minSampleIntervalNs", 5L)
+                .put("attemptedSampleCount", 3L)
+                .put("processId", processId)
+                .put("files", new JSONObject()
+                        .put("sampling", fileInfo(sampling))
+                        .put("sampling-mapping", fileInfo(mappingBytes)));
         try (ZipOutputStream zip = new ZipOutputStream(new FileOutputStream(artifact))) {
             put(zip, "manifest.json", manifest.toString().getBytes(StandardCharsets.UTF_8));
             put(zip, "sampling.bin", sampling);
@@ -517,6 +865,53 @@ public class StackAnalyzerTest {
             hash.append(String.format("%02x", value & 0xff));
         }
         return new JSONObject().put("size", content.length).put("sha256", hash.toString());
+    }
+
+    private static void assertDirectoryEmpty(File directory) {
+        File[] children = directory.listFiles();
+        Assert.assertNotNull(children);
+        Assert.assertEquals(0, children.length);
+    }
+
+    private static final class CloseTrackingInputStream extends ByteArrayInputStream {
+        boolean closed;
+
+        CloseTrackingInputStream(byte[] buffer) {
+            super(buffer);
+        }
+
+        @Override
+        public void close() throws IOException {
+            closed = true;
+            super.close();
+        }
+    }
+
+    private static final class FixedLengthInputStream extends InputStream {
+        private long remaining;
+
+        FixedLengthInputStream(long length) {
+            remaining = length;
+        }
+
+        @Override
+        public int read() {
+            if (remaining <= 0) {
+                return -1;
+            }
+            remaining--;
+            return 0;
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) {
+            if (remaining <= 0) {
+                return -1;
+            }
+            int count = (int) Math.min(remaining, length);
+            remaining -= count;
+            return count;
+        }
     }
 
     private static final class Record {

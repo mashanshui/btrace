@@ -74,7 +74,7 @@ Windows 优先使用 Gradle Wrapper：
 本仓库当前只发布主库 `rhea-inhouse`，公开坐标为：
 
 ```text
-io.github.mashanshui:rhea-inhouse:1.0.0
+io.github.mashanshui:rhea-inhouse:1.0.1
 ```
 
 发布者必须先在 [Central Publisher Portal](https://central.sonatype.com/) 验证 `io.github.mashanshui` namespace，并在 [User Tokens](https://central.sonatype.com/usertoken) 页面生成 Portal User Token。还需要准备可用的 GPG/PGP 私钥；Central 要求主 AAR、POM、sources、javadoc 及每个文件的签名和校验和。

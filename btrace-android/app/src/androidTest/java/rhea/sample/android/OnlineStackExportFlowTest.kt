@@ -62,6 +62,9 @@ class OnlineStackExportFlowTest {
         context.getExternalFilesDir(OUTPUT_DIRECTORY)?.let { outputDir ->
             File(outputDir, "range.rheatrace.zip").delete()
             File(outputDir, "all.rheatrace.zip").delete()
+            File(outputDir, "jank.rheajank.zip").delete()
+            File(outputDir, "android-test-jank-1.rheajank.zip").delete()
+            File(outputDir, "android-test-jank-2.rheajank.zip").delete()
         }
         assumeTrue(
             "线上端到端测试需要 -Ponline_trace_test=true",
@@ -86,6 +89,10 @@ class OnlineStackExportFlowTest {
                 .setDiskQuotaBytes(8L * 1024L * 1024L)
                 .setMaxArtifactBytes(4L * 1024L * 1024L)
                 .setMappingId("app-online-test")
+                .setAnonymousDeviceId("device-anonymous-online-test")
+                .setBuildId("app-online-test-build")
+                .setEnvironment("test")
+                .setChannel("instrumentation")
                 .build()
         )
         assertTrue(
@@ -93,6 +100,7 @@ class OnlineStackExportFlowTest {
             result == RheaTrace3.InitResult.STARTED
                     || result == RheaTrace3.InitResult.ALREADY_STARTED
         )
+        RheaTrace3.getPendingJankFiles().forEach { RheaTrace3.deleteJankFile(it) }
     }
 
     @After
@@ -128,10 +136,48 @@ class OnlineStackExportFlowTest {
 
         val rangeResult = awaitRangeExport(requestedStart, requestedEnd)
         val allResult = awaitAllExport()
+        val jankEvent = RheaTrace3.JankEvent.builder()
+            .setEventId("android-test-jank-1")
+            .setOccurredAt(System.currentTimeMillis())
+            .setSessionId("android-test-session")
+            .setScene("online_stack_flow")
+            .setMessageStartNs(requestedStart)
+            .setMessageEndNs(requestedEnd)
+            .setThresholdNs(minOf(100_000_000L, requestedEnd - requestedStart))
+            .setAttemptedSampleCount(40)
+            .build()
+        val jankResult = awaitJankExport(jankEvent)
+        assertNotNull(jankResult.artifact)
+        val firstJankBytes = jankResult.artifact!!.readBytes()
+        val firstJankManifest = readManifest(jankResult.artifact!!)
+        val reusedJankResult = awaitJankExport(jankEvent)
+        val secondJankEvent = RheaTrace3.JankEvent.builder()
+            .setEventId("android-test-jank-2")
+            .setOccurredAt(System.currentTimeMillis())
+            .setSessionId("android-test-session-2")
+            .setScene("online_stack_flow_2")
+            .setMessageStartNs(requestedStart)
+            .setMessageEndNs(requestedEnd)
+            .setThresholdNs(minOf(100_000_000L, requestedEnd - requestedStart))
+            .setAttemptedSampleCount(40)
+            .build()
+        val secondJankResult = awaitJankExport(secondJankEvent)
         assertTrue("范围导出失败：${rangeResult.message}", rangeResult.isSuccess())
         assertTrue("全量导出失败：${allResult.message}", allResult.isSuccess())
+        assertTrue("卡顿导出失败：${jankResult.message}", jankResult.isSuccess())
+        assertTrue("卡顿复用失败：${reusedJankResult.message}", reusedJankResult.isSuccess())
+        assertTrue("第二个卡顿导出失败：${secondJankResult.message}", secondJankResult.isSuccess())
         assertNotNull(rangeResult.artifact)
         assertNotNull(allResult.artifact)
+        assertNotNull(secondJankResult.artifact)
+        assertEquals(jankResult.artifact, reusedJankResult.artifact)
+        assertEquals(jankResult.recordCount, reusedJankResult.recordCount)
+        assertTrue(firstJankBytes.contentEquals(reusedJankResult.artifact!!.readBytes()))
+        assertEquals(firstJankManifest, readManifest(reusedJankResult.artifact!!))
+        assertTrue(jankResult.artifact!!.isFile)
+        assertTrue(secondJankResult.artifact!!.isFile)
+        assertTrue(jankResult.artifact != secondJankResult.artifact)
+        assertTrue(jankResult.artifact!!.name != secondJankResult.artifact!!.name)
         assertTrue(rangeResult.recordCount > 0)
         assertTrue(allResult.recordCount > 0)
         assertTrue(rangeResult.actualRange.recordCount == rangeResult.recordCount)
@@ -143,10 +189,20 @@ class OnlineStackExportFlowTest {
         assertNotNull("无法创建设备测试产物目录", outputDir)
         val rangeFile = File(outputDir!!, "range.rheatrace.zip")
         val allFile = File(outputDir, "all.rheatrace.zip")
+        // 保留 SDK 生成的 <eventId>.rheajank.zip 文件名，验证完成后再复制固定别名
+        // 供 Gradle 任务拉取，避免把契约中的幂等文件名覆盖成测试别名。
+        val jankFile = File(outputDir, "${jankEvent.eventId}.rheajank.zip")
+        val secondJankFile = File(outputDir, "${secondJankEvent.eventId}.rheajank.zip")
+        val jankPullFile = File(outputDir, "jank.rheajank.zip")
         rangeResult.artifact!!.copyTo(rangeFile, overwrite = true)
         allResult.artifact!!.copyTo(allFile, overwrite = true)
-        validateArtifact(rangeFile, "RANGE")
-        validateArtifact(allFile, "ALL")
+        jankResult.artifact!!.copyTo(jankFile, overwrite = true)
+        validateStackArtifact(rangeFile, "RANGE")
+        validateStackArtifact(allFile, "ALL")
+        validateJankArtifact(jankFile, jankEvent)
+        secondJankResult.artifact!!.copyTo(secondJankFile, overwrite = true)
+        validateJankArtifact(secondJankFile, secondJankEvent)
+        jankFile.copyTo(jankPullFile, overwrite = true)
     }
 
     private fun waitForAvailableRange(): RheaTrace3.BufferTimeRange {
@@ -162,9 +218,17 @@ class OnlineStackExportFlowTest {
     private fun awaitRangeExport(startNs: Long, endNs: Long): RheaTrace3.ExportResult {
         val resultRef = AtomicReference<RheaTrace3.ExportResult>()
         val done = CountDownLatch(1)
-        val request = RheaTrace3.exportStackData(startNs, endNs) {
-            resultRef.set(it)
-            done.countDown()
+        var request = RheaTrace3.ExportRequestResult.BUSY
+        val deadline = SystemClock.elapsedRealtime() + 10_000L
+        while (request == RheaTrace3.ExportRequestResult.BUSY
+            && SystemClock.elapsedRealtime() < deadline) {
+            request = RheaTrace3.exportStackData(startNs, endNs) {
+                resultRef.set(it)
+                done.countDown()
+            }
+            if (request == RheaTrace3.ExportRequestResult.BUSY) {
+                SystemClock.sleep(50)
+            }
         }
         assertEquals(RheaTrace3.ExportRequestResult.ACCEPTED, request)
         assertTrue("范围导出回调超时", done.await(30, TimeUnit.SECONDS))
@@ -174,12 +238,40 @@ class OnlineStackExportFlowTest {
     private fun awaitAllExport(): RheaTrace3.ExportResult {
         val resultRef = AtomicReference<RheaTrace3.ExportResult>()
         val done = CountDownLatch(1)
-        val request = RheaTrace3.exportAllStackData {
-            resultRef.set(it)
-            done.countDown()
+        var request = RheaTrace3.ExportRequestResult.BUSY
+        val deadline = SystemClock.elapsedRealtime() + 10_000L
+        while (request == RheaTrace3.ExportRequestResult.BUSY
+            && SystemClock.elapsedRealtime() < deadline) {
+            request = RheaTrace3.exportAllStackData {
+                resultRef.set(it)
+                done.countDown()
+            }
+            if (request == RheaTrace3.ExportRequestResult.BUSY) {
+                SystemClock.sleep(50)
+            }
         }
         assertEquals(RheaTrace3.ExportRequestResult.ACCEPTED, request)
         assertTrue("全量导出回调超时", done.await(30, TimeUnit.SECONDS))
+        return requireResult(resultRef.get())
+    }
+
+    private fun awaitJankExport(event: RheaTrace3.JankEvent): RheaTrace3.ExportResult {
+        val resultRef = AtomicReference<RheaTrace3.ExportResult>()
+        val done = CountDownLatch(1)
+        var request = RheaTrace3.ExportRequestResult.BUSY
+        val deadline = SystemClock.elapsedRealtime() + 10_000L
+        while (request == RheaTrace3.ExportRequestResult.BUSY
+            && SystemClock.elapsedRealtime() < deadline) {
+            request = RheaTrace3.exportJankTrace(event) {
+                resultRef.set(it)
+                done.countDown()
+            }
+            if (request == RheaTrace3.ExportRequestResult.BUSY) {
+                SystemClock.sleep(50)
+            }
+        }
+        assertEquals(RheaTrace3.ExportRequestResult.ACCEPTED, request)
+        assertTrue("卡顿导出回调超时", done.await(30, TimeUnit.SECONDS))
         return requireResult(resultRef.get())
     }
 
@@ -188,7 +280,7 @@ class OnlineStackExportFlowTest {
         return result!!
     }
 
-    private fun validateArtifact(file: File, expectedSelection: String) {
+    private fun validateStackArtifact(file: File, expectedSelection: String) {
         assertTrue("产物不存在：$file", file.isFile)
         ZipFile(file).use { zip ->
             val names = mutableSetOf<String>()
@@ -211,6 +303,55 @@ class OnlineStackExportFlowTest {
             assertTrue(manifest.getInt("recordCount") > 0)
             assertFileInfo(zip, "sampling.bin", manifest.getJSONObject("files"))
             assertFileInfo(zip, "sampling-mapping.bin", manifest.getJSONObject("files"))
+        }
+    }
+
+    private fun validateJankArtifact(file: File, event: RheaTrace3.JankEvent) {
+        assertTrue("卡顿产物不存在：$file", file.isFile)
+        assertEquals("${event.eventId}.rheajank.zip", file.name)
+        ZipFile(file).use { zip ->
+            val names = zip.entries().asSequence().map { it.name }.toSet()
+            assertEquals(
+                setOf("manifest.json", "sampling.bin", "sampling-mapping.bin"),
+                names
+            )
+            val manifest = JSONObject(
+                zip.getInputStream(zip.getEntry("manifest.json"))
+                    .bufferedReader(Charsets.UTF_8).use { it.readText() }
+            )
+            assertEquals(3, manifest.getInt("schemaVersion"))
+            assertEquals("RHEA_JANK", manifest.getString("artifactType"))
+            assertEquals(event.eventId, manifest.getString("eventId"))
+            assertEquals(event.occurredAt, manifest.getLong("occurredAt"))
+            assertEquals(event.sessionId, manifest.getString("sessionId"))
+            assertEquals("device-anonymous-online-test",
+                manifest.getString("anonymousDeviceId"))
+            assertEquals(context.packageName, manifest.getString("packageName"))
+            assertEquals("1.0", manifest.getString("appVersion"))
+            assertEquals(1L, manifest.getLong("versionCode"))
+            assertEquals("app-online-test-build", manifest.getString("buildId"))
+            assertEquals("test", manifest.getString("environment"))
+            assertEquals("instrumentation", manifest.getString("channel"))
+            assertEquals(event.scene, manifest.getString("scene"))
+            assertEquals(event.messageStartNs, manifest.getLong("messageStartNs"))
+            assertEquals(event.messageEndNs, manifest.getLong("messageEndNs"))
+            assertEquals(event.thresholdNs, manifest.getLong("thresholdNs"))
+            assertEquals(5_000_000L, manifest.getLong("minSampleIntervalNs"))
+            assertEquals(event.attemptedSampleCount,
+                manifest.getLong("attemptedSampleCount"))
+            assertEquals(Process.myPid(), manifest.getInt("processId"))
+            assertTrue(manifest.getString("osVersion").isNotBlank())
+            assertTrue(manifest.getString("deviceModel").isNotBlank())
+            assertEquals(22, manifest.length())
+            assertFileInfo(zip, "sampling.bin", manifest.getJSONObject("files"))
+            assertFileInfo(zip, "sampling-mapping.bin", manifest.getJSONObject("files"))
+        }
+    }
+
+    private fun readManifest(file: File): String {
+        ZipFile(file).use { zip ->
+            return zip.getInputStream(zip.getEntry("manifest.json"))
+                .bufferedReader(Charsets.UTF_8).use { it.readText() }
         }
     }
 
