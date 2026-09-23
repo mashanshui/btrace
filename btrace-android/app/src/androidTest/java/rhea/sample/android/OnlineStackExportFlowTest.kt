@@ -19,6 +19,7 @@ import android.app.Application
 import android.content.Intent
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.os.Process
 import android.os.SystemClock
@@ -35,10 +36,14 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.security.MessageDigest
 import java.util.Enumeration
+import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import java.util.zip.ZipFile
 
@@ -81,24 +86,43 @@ class OnlineStackExportFlowTest {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
 
         val application = context.applicationContext as Application
-        val result = RheaTrace3.initOnline(
-            application,
-            RheaTrace3.OnlineTraceConfig.builder()
-                .setBufferSizeBytes(1024 * 1024)
-                .setMinSampleIntervalMs(5)
-                .setDiskQuotaBytes(8L * 1024L * 1024L)
-                .setMaxArtifactBytes(4L * 1024L * 1024L)
-                .setMappingId("app-online-test")
-                .setAnonymousDeviceId("device-anonymous-online-test")
-                .setBuildId("app-online-test-build")
-                .setEnvironment("test")
-                .setChannel("instrumentation")
-                .build()
-        )
+        val onlineConfig = RheaTrace3.OnlineTraceConfig.builder()
+            .setBufferSizeBytes(1024 * 1024)
+            .setMinSampleIntervalMs(5)
+            .setDiskQuotaBytes(8L * 1024L * 1024L)
+            .setMaxArtifactBytes(4L * 1024L * 1024L)
+            .setMappingId("app-online-test")
+            .setAnonymousDeviceId("device-anonymous-online-test")
+            .setBuildId("app-online-test-build")
+            .setEnvironment("test")
+            .setChannel("instrumentation")
+            .setProcessId(PROCESS_ID)
+            .build()
+        val result = RheaTrace3.initOnline(application, onlineConfig)
         assertTrue(
             "线上初始化失败：$result",
             result == RheaTrace3.InitResult.STARTED
                     || result == RheaTrace3.InitResult.ALREADY_STARTED
+        )
+        assertEquals(
+            RheaTrace3.InitResult.ALREADY_STARTED,
+            RheaTrace3.initOnline(application, onlineConfig)
+        )
+        val conflictingConfig = RheaTrace3.OnlineTraceConfig.builder()
+            .setBufferSizeBytes(1024 * 1024)
+            .setMinSampleIntervalMs(5)
+            .setDiskQuotaBytes(8L * 1024L * 1024L)
+            .setMaxArtifactBytes(4L * 1024L * 1024L)
+            .setMappingId("app-online-test")
+            .setAnonymousDeviceId("device-anonymous-online-test")
+            .setBuildId("app-online-test-build")
+            .setEnvironment("test")
+            .setChannel("instrumentation")
+            .setProcessId(CONFLICT_PROCESS_ID)
+            .build()
+        assertEquals(
+            RheaTrace3.InitResult.MODE_CONFLICT,
+            RheaTrace3.initOnline(application, conflictingConfig)
         )
         RheaTrace3.getPendingJankFiles().forEach { RheaTrace3.deleteJankFile(it) }
     }
@@ -112,8 +136,24 @@ class OnlineStackExportFlowTest {
     fun exportRangeAndAllArtifacts_canBeParsedByProcessor() {
         val captureDone = CountDownLatch(1)
         val mainHandler = Handler(Looper.getMainLooper())
+        val mainTid = AtomicInteger(0)
+        val worker = HandlerThread("online-stack-worker")
+        worker.start()
+        val workerDone = CountDownLatch(1)
+        Handler(worker.looper).post {
+            try {
+                repeat(5) {
+                    RheaTrace3.captureStackTrace(true)
+                }
+            } finally {
+                workerDone.countDown()
+            }
+        }
+        assertTrue("后台线程抓栈未完成", workerDone.await(5, TimeUnit.SECONDS))
+        worker.quitSafely()
         mainHandler.post {
             try {
+                mainTid.set(Process.myTid())
                 // Native 线上模式只接受主线程抓栈；间隔高于 5ms 以避开限流。
                 repeat(40) {
                     RheaTrace3.captureStackTrace(true)
@@ -197,11 +237,14 @@ class OnlineStackExportFlowTest {
         rangeResult.artifact!!.copyTo(rangeFile, overwrite = true)
         allResult.artifact!!.copyTo(allFile, overwrite = true)
         jankResult.artifact!!.copyTo(jankFile, overwrite = true)
-        validateStackArtifact(rangeFile, "RANGE")
-        validateStackArtifact(allFile, "ALL")
-        validateJankArtifact(jankFile, jankEvent)
+        val processId = validateStackArtifact(rangeFile, "RANGE", mainTid.get())
+        assertEquals(processId,
+            validateStackArtifact(allFile, "ALL", mainTid.get()))
+        assertEquals(processId,
+            validateJankArtifact(jankFile, jankEvent, mainTid.get()))
         secondJankResult.artifact!!.copyTo(secondJankFile, overwrite = true)
-        validateJankArtifact(secondJankFile, secondJankEvent)
+        assertEquals(processId,
+            validateJankArtifact(secondJankFile, secondJankEvent, mainTid.get()))
         jankFile.copyTo(jankPullFile, overwrite = true)
     }
 
@@ -280,9 +323,11 @@ class OnlineStackExportFlowTest {
         return result!!
     }
 
-    private fun validateStackArtifact(file: File, expectedSelection: String) {
+    private fun validateStackArtifact(
+        file: File, expectedSelection: String, mainTid: Int
+    ): String {
         assertTrue("产物不存在：$file", file.isFile)
-        ZipFile(file).use { zip ->
+        return ZipFile(file).use { zip ->
             val names = mutableSetOf<String>()
             val entries: Enumeration<*> = zip.entries()
             while (entries.hasMoreElements()) {
@@ -301,15 +346,23 @@ class OnlineStackExportFlowTest {
             assertEquals(expectedSelection, manifest.getString("selectionType"))
             assertEquals("ELAPSED_REALTIME_NANOS", manifest.getString("clock"))
             assertTrue(manifest.getInt("recordCount") > 0)
+            val processId = manifest.getString("processId")
+            assertUuidV4(processId)
+            assertEquals(PROCESS_ID, processId)
+            assertEquals("main", manifest.getString("threadScope"))
+            assertSamplingIdentity(zip, processId, mainTid)
             assertFileInfo(zip, "sampling.bin", manifest.getJSONObject("files"))
             assertFileInfo(zip, "sampling-mapping.bin", manifest.getJSONObject("files"))
+            processId
         }
     }
 
-    private fun validateJankArtifact(file: File, event: RheaTrace3.JankEvent) {
+    private fun validateJankArtifact(
+        file: File, event: RheaTrace3.JankEvent, mainTid: Int
+    ): String {
         assertTrue("卡顿产物不存在：$file", file.isFile)
         assertEquals("${event.eventId}.rheajank.zip", file.name)
-        ZipFile(file).use { zip ->
+        return ZipFile(file).use { zip ->
             val names = zip.entries().asSequence().map { it.name }.toSet()
             assertEquals(
                 setOf("manifest.json", "sampling.bin", "sampling-mapping.bin"),
@@ -339,13 +392,67 @@ class OnlineStackExportFlowTest {
             assertEquals(5_000_000L, manifest.getLong("minSampleIntervalNs"))
             assertEquals(event.attemptedSampleCount,
                 manifest.getLong("attemptedSampleCount"))
-            assertEquals(Process.myPid(), manifest.getInt("processId"))
+            val processId = manifest.getString("processId")
+            assertUuidV4(processId)
+            assertEquals(PROCESS_ID, processId)
+            assertEquals("main", manifest.getString("threadScope"))
+            assertSamplingIdentity(zip, processId, mainTid)
             assertTrue(manifest.getString("osVersion").isNotBlank())
             assertTrue(manifest.getString("deviceModel").isNotBlank())
-            assertEquals(22, manifest.length())
+            assertEquals(23, manifest.length())
             assertFileInfo(zip, "sampling.bin", manifest.getJSONObject("files"))
             assertFileInfo(zip, "sampling-mapping.bin", manifest.getJSONObject("files"))
+            processId
         }
+    }
+
+    private fun assertUuidV4(value: String) {
+        assertTrue(
+            "不是 canonical UUID v4：$value",
+            UUID_V4.matches(value)
+        )
+        val uuid = UUID.fromString(value)
+        assertEquals(4, uuid.version())
+        assertEquals(2, uuid.variant())
+        assertEquals(value, uuid.toString())
+    }
+
+    private fun assertSamplingIdentity(zip: ZipFile, processId: String, mainTid: Int) {
+        val sampling = zip.getInputStream(zip.getEntry("sampling.bin"))
+            .use { it.readBytes() }
+        val buffer = ByteBuffer.wrap(sampling).order(ByteOrder.LITTLE_ENDIAN)
+        assertTrue("sampling header 不完整", buffer.remaining() >= 28)
+        val version = buffer.getInt(8)
+        val recordCount = buffer.getInt(20)
+        buffer.position(24)
+        val extraLength = buffer.int
+        assertTrue("sampling extra 长度无效", extraLength > 0)
+        val extraBytes = ByteArray(extraLength)
+        buffer.get(extraBytes)
+        val extra = JSONObject(String(extraBytes, Charsets.UTF_8))
+        assertEquals(processId, extra.getString("processId"))
+        assertEquals("main", extra.getString("threadScope"))
+
+        val tids = mutableSetOf<Int>()
+        repeat(recordCount) {
+            val type = buffer.short.toInt() and 0xffff
+            tids.add(buffer.short.toInt())
+            buffer.int
+            repeat(4) { buffer.long }
+            if (type == 15) {
+                buffer.long
+            }
+            if (version >= 4) {
+                repeat(2) { buffer.long }
+            }
+            if (version >= 5) {
+                repeat(3) { buffer.int }
+            }
+            val savedDepth = buffer.int
+            buffer.int
+            buffer.position(buffer.position() + savedDepth * 8)
+        }
+        assertEquals(setOf(mainTid), tids)
     }
 
     private fun readManifest(file: File): String {
@@ -368,5 +475,10 @@ class OnlineStackExportFlowTest {
 
     companion object {
         private const val OUTPUT_DIRECTORY = "rhea-online-stack-test"
+        private const val PROCESS_ID = "11111111-1111-4111-8111-111111111111"
+        private const val CONFLICT_PROCESS_ID = "22222222-2222-4222-8222-222222222222"
+        private val UUID_V4 = Regex(
+            "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"
+        )
     }
 }

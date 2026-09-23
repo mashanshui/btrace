@@ -21,6 +21,7 @@ import android.content.Context;
 import java.io.File;
 import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 
 /** RheaTrace 对外公开 API。当前只支持主进程采集。 */
 public final class RheaTrace3 {
@@ -63,6 +64,7 @@ public final class RheaTrace3 {
         private final String buildId;
         private final String environment;
         private final String channel;
+        private final String processId;
 
         private OnlineTraceConfig(Builder builder) {
             bufferSizeBytes = builder.bufferSizeBytes;
@@ -82,6 +84,7 @@ public final class RheaTrace3 {
             buildId = builder.buildId;
             environment = builder.environment;
             channel = builder.channel;
+            processId = builder.processId;
         }
 
         public int getBufferSizeBytes() { return bufferSizeBytes; }
@@ -101,6 +104,7 @@ public final class RheaTrace3 {
         public String getBuildId() { return buildId; }
         public String getEnvironment() { return environment; }
         public String getChannel() { return channel; }
+        public String getProcessId() { return processId; }
 
         public static Builder builder() { return new Builder(); }
 
@@ -122,6 +126,7 @@ public final class RheaTrace3 {
             private String buildId = "";
             private String environment = "";
             private String channel = "";
+            private String processId = UUID.randomUUID().toString();
 
             public Builder setBufferSizeBytes(int value) {
                 bufferSizeBytes = value;
@@ -208,6 +213,11 @@ public final class RheaTrace3 {
                 return this;
             }
 
+            public Builder setProcessId(String value) {
+                processId = value == null ? "" : value;
+                return this;
+            }
+
             public OnlineTraceConfig build() {
                 if (bufferSizeBytes < 1024 * 1024 || bufferSizeBytes > 16 * 1024 * 1024) {
                     throw new IllegalArgumentException(
@@ -228,7 +238,21 @@ public final class RheaTrace3 {
                 validateOptionalString(buildId, 256, "buildId");
                 validateOptionalString(environment, 64, "environment");
                 validateOptionalString(channel, 128, "channel");
+                validateUuidV4(processId, "processId");
                 return new OnlineTraceConfig(this);
+            }
+
+            private static void validateUuidV4(String value, String name) {
+                try {
+                    UUID uuid = UUID.fromString(value);
+                    if (uuid.version() != 4 || uuid.variant() != 2
+                            || !uuid.toString().equals(value)) {
+                        throw new IllegalArgumentException(name + " must be a canonical UUID v4");
+                    }
+                } catch (IllegalArgumentException exception) {
+                    throw new IllegalArgumentException(
+                            name + " must be a canonical UUID v4", exception);
+                }
             }
 
             private static void validateOptionalString(String value, int maxLength, String name) {
@@ -452,5 +476,18 @@ public final class RheaTrace3 {
     /** 同步抓取当前线程 Java 栈。线上模式下 force=true 仍受最低采样间隔限制。 */
     public static void captureStackTrace(boolean force) {
         // noop
+    }
+
+    /** 开启一次全进程抓栈性能统计。 */
+    public static void beginStackTiming() {
+        // noop
+    }
+
+    /**
+     * 结束抓栈性能统计并返回汇总日志。
+     * noop 制品始终返回空字符串。
+     */
+    public static String endStackTiming() {
+        return "";
     }
 }

@@ -23,6 +23,8 @@ import java.util.zip.ZipOutputStream;
 
 public class StackArtifactTest {
 
+    private static final String PROCESS_ID = "123e4567-e89b-42d3-a456-426614174000";
+
     @Test
     public void opensValidArtifact() throws Exception {
         File valid = File.createTempFile("rhea-stack", ".zip");
@@ -44,6 +46,8 @@ public class StackArtifactTest {
                     .put("actualStartNs", 1)
                     .put("actualEndNs", 2)
                     .put("recordCount", 1)
+                    .put("processId", PROCESS_ID)
+                    .put("threadScope", "main")
                     .put("files", files);
             try (ZipOutputStream zip = new ZipOutputStream(new FileOutputStream(valid))) {
                 put(zip, "manifest.json", manifest.toString());
@@ -111,6 +115,35 @@ public class StackArtifactTest {
     }
 
     @Test(expected = java.io.IOException.class)
+    public void rejectsStackV1NumericProcessId() throws Exception {
+        File invalid = File.createTempFile("rhea-stack-v1-process", ".zip");
+        byte[] sampling = "sample".getBytes(StandardCharsets.UTF_8);
+        byte[] mapping = "mapping".getBytes(StandardCharsets.UTF_8);
+        try {
+            writeArtifact(invalid, validManifest(sampling, mapping)
+                    .put("processId", 123L), sampling, mapping);
+            StackArtifact.open(invalid);
+        } finally {
+            Assert.assertTrue(invalid.delete());
+        }
+    }
+
+    @Test(expected = java.io.IOException.class)
+    public void rejectsStackV1NonCanonicalProcessId() throws Exception {
+        File invalid = File.createTempFile("rhea-stack-v1-process-format", ".zip");
+        byte[] sampling = "sample".getBytes(StandardCharsets.UTF_8);
+        byte[] mapping = "mapping".getBytes(StandardCharsets.UTF_8);
+        try {
+            writeArtifact(invalid, validManifest(sampling, mapping)
+                    .put("processId", "123E4567-E89B-42D3-A456-426614174000"),
+                    sampling, mapping);
+            StackArtifact.open(invalid);
+        } finally {
+            Assert.assertTrue(invalid.delete());
+        }
+    }
+
+    @Test(expected = java.io.IOException.class)
     public void rejectsJankV3MissingRequiredField() throws Exception {
         verifyInvalidJankManifest("sessionId", null);
     }
@@ -123,6 +156,16 @@ public class StackArtifactTest {
     @Test(expected = java.io.IOException.class)
     public void rejectsJankV3ThresholdLongerThanMessage() throws Exception {
         verifyInvalidJankManifest("thresholdNs", 301L);
+    }
+
+    @Test(expected = java.io.IOException.class)
+    public void rejectsJankV3NumericProcessId() throws Exception {
+        verifyInvalidJankManifest("processId", 123L);
+    }
+
+    @Test(expected = java.io.IOException.class)
+    public void rejectsJankV3NonMainThreadScope() throws Exception {
+        verifyInvalidJankManifest("threadScope", "all");
     }
 
     @Test(expected = java.io.IOException.class)
@@ -244,6 +287,8 @@ public class StackArtifactTest {
                 .put("actualStartNs", 1)
                 .put("actualEndNs", 2)
                 .put("recordCount", 1)
+                .put("processId", PROCESS_ID)
+                .put("threadScope", "main")
                 .put("files", new JSONObject()
                         .put("sampling", fileInfo(sampling))
                         .put("sampling-mapping", fileInfo(mapping)));
@@ -272,7 +317,8 @@ public class StackArtifactTest {
                 .put("thresholdNs", 200L)
                 .put("minSampleIntervalNs", 5L)
                 .put("attemptedSampleCount", 3L)
-                .put("processId", 123L)
+                .put("processId", PROCESS_ID)
+                .put("threadScope", "main")
                 .put("files", new JSONObject()
                         .put("sampling", fileInfo(sampling))
                         .put("sampling-mapping", fileInfo(mapping)));

@@ -32,33 +32,42 @@ public class StackTraceConvertor {
     private static final int SINGLE_SAMPLING_DURATION = 10;
 
     public static Trace convert(int pid, List<StackList> items, Map<Integer, String> threadNames) {
-        return convert(pid, Arguments.get().appName, items, threadNames);
+        return convert(pid, pid, Arguments.get().appName, items, threadNames);
     }
 
     public static Trace convert(int pid, String appName, List<StackList> items,
                                 Map<Integer, String> threadNames) {
+        return convert(pid, pid, appName, items, threadNames);
+    }
+
+    /** 使用独立的 Perfetto 数值 pid 和主线程 tid 构建采样轨迹。 */
+    public static Trace convert(int perfettoPid, int mainTid, String appName,
+                                List<StackList> items,
+                                Map<Integer, String> threadNames) {
         items.sort(Comparator.comparingLong(o -> o.nanoTime));
         Map<Integer, List<StackList>> threadItemsMap = groupByThreadId(items);
         Trace trace = new Trace();
-        trace.setProcess(pid, appName == null ? "unknown" : appName);
+        trace.setProcess(perfettoPid, appName == null ? "unknown" : appName);
         for (Map.Entry<Integer, List<StackList>> entry : threadItemsMap.entrySet()) {
             Integer tid = entry.getKey();
-            String threadName = threadNames.get(tid);
+            String threadName = tid == mainTid ? "main" : threadNames.get(tid);
             if (threadName == null) {
                 threadName = "Thread-" + tid;
             }
-            trace.setThread(pid, tid, threadName);
+            trace.setThread(perfettoPid, tid, threadName);
         }
         for (Map.Entry<Integer, List<StackList>> entry : threadItemsMap.entrySet()) {
-            convertSingleThread(trace, pid, entry.getKey(), entry.getValue());
+            convertSingleThread(trace, perfettoPid, mainTid,
+                    entry.getKey(), entry.getValue());
         }
         return trace;
     }
 
-    private static void convertSingleThread(Trace trace, int pid, int tid, List<StackList> items) {
-        CallNode root = decodeCallNode(items, pid == tid);
+    private static void convertSingleThread(Trace trace, int perfettoPid, int mainTid,
+                                            int tid, List<StackList> items) {
+        CallNode root = decodeCallNode(items, mainTid == tid);
         for (CallNode child : root.children) {
-            encodeTrace(trace, pid, tid, child);
+            encodeTrace(trace, perfettoPid, tid, child);
         }
     }
 

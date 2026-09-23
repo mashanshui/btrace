@@ -6,7 +6,7 @@
 
 ### 能力与边界
 
-`rhea-trace-processor` 提供不依赖 Spring、Servlet 或特定存储系统的 `StackParser` Java 接口。Processor 仅支持 v1 `.rheatrace.zip` 和最新 v3 `.rheajank.zip`：它执行 ZIP 安全检查、manifest 和 SHA-256 校验、Sampling v5 解码、可选的 ProGuard/R8 retrace、时间窗口裁剪和耗时估算，最终返回兼容的 `RHEA_STACK_REPORT` JSON。旧 v2 卡顿产物（无论是否使用 `packageName`）会在解析入口被拒绝。
+`rhea-trace-processor` 提供不依赖 Spring、Servlet 或特定存储系统的 `StackParser` Java 接口。Processor 仅支持 v1 `.rheatrace.zip` 和最新 v3 `.rheajank.zip`：它执行 ZIP 安全检查、manifest 和 SHA-256 校验、Sampling v5 解码、可选的 ProGuard/R8 retrace、时间窗口裁剪和耗时估算，最终返回兼容的 `RHEA_STACK_REPORT` JSON。线上 v1/v3 还会校验 canonical UUID v4 `processId`、`threadScope=main`、manifest 与 sampling extra 的一致性，以及原始记录中只能出现一个 tid。旧 v2 卡顿产物（无论是否使用 `packageName`）会在解析入口被拒绝。
 
 v3 输入的 `schemaVersion=3 / artifactType=RHEA_JANK` 已经由 Processor 严格校验。Sampling v5 的小端序、`ELAPSED_REALTIME_NANOS` 时钟和 `RANGE` 选择类型由协议固定，不需要服务端从客户端重复传参。完整报告在 v3 时额外包含经过校验的 `sourceManifest`，供服务端取得事件身份和落库维度；报告自身仍保持 `schemaVersion=1`，这是输出报告版本，不是输入产物版本。
 
@@ -56,7 +56,7 @@ dependencies {
 .\gradlew.bat :rhea-trace-processor:publishToMavenLocal --no-daemon
 ~~~
 
-发布后，服务端测试工程应把 `mavenLocal()` 放在远程仓库之前，并使用与构件一致的版本，例如 `1.0.1`。本地构件默认位于 Windows 的 `%USERPROFILE%\\.m2\\repository\\io\\github\\mashanshui\\rhea-trace-processor\\<version>`；该目录属于开发机缓存，不应提交到仓库或作为正式发布凭据。
+发布后，服务端测试工程应把 `mavenLocal()` 放在远程仓库之前，并使用与构件一致的版本，例如 `1.0.2`。本地构件默认位于 Windows 的 `%USERPROFILE%\\.m2\\repository\\io\\github\\mashanshui\\rhea-trace-processor\\<version>`；该目录属于开发机缓存，不应提交到仓库或作为正式发布凭据。
 
 ### 框架无关调用
 
@@ -163,13 +163,13 @@ String reportJson = parser.parseWithMappingResolver(input, metadata ->
 | --- | --- |
 | `schemaVersion` | 当前报告 schema 版本，值为 `1` |
 | `artifactType` | 完整报告固定为 `RHEA_STACK_REPORT` |
-| `appName`、`mappingId`、`processId` | 产物标识和目标进程 |
+| `appName`、`mappingId`、`processId` | 产物标识和目标进程；`processId` 为 canonical UUID v4 字符串 |
 | `actualStartNs`、`actualEndNs`、`durationNs` | 本次实际解析窗口，时间基准为 elapsed realtime 纳秒 |
 | `recordCount`、`pointSampleCount`、`exactRecordCount` | 原始记录、点采样和精确 duration 记录数量 |
 | `exactCoveredDurationNs` | 所有精确区间合并后的覆盖时长 |
 | `estimatedCoveredDurationNs` | 所有估算区间合并后的覆盖时长 |
 | `estimationPolicy` | 点采样估算间隔、上限和默认值来源 |
-| `threads` | 按线程分别输出的时间明细和调用树 |
+| `threads` | 按线程分别输出的时间明细和调用树；当前线上输入恰好只有 `threadName: "main"` 的唯一线程 |
 | `warnings` | 数据缺失、点采样语义、缓冲区覆盖等提示 |
 
 #### v3 `sourceManifest`
@@ -198,10 +198,13 @@ String reportJson = parser.parseWithMappingResolver(input, metadata ->
 | `thresholdNs` | integer，纳秒 | 客户端本次采用的卡顿阈值 |
 | `minSampleIntervalNs` | integer，纳秒 | Native 采集器的最小采样请求间隔 |
 | `attemptedSampleCount` | integer，非负 | 客户端在该消息区间实际发起的采样请求数 |
-| `processId` | integer，正数 | 主进程 ID；用于识别报告中的主线程 |
+| `processId` | string，canonical UUID v4 | Android 进程身份；与 sampling extra 的值一致，不用于和 `tid` 数值比较 |
+| `threadScope` | string，固定为 `main` | 声明该线上产物只包含主线程采样 |
 | `files` | object | 两个二进制条目的期望大小和 SHA-256；Processor 已在返回前核对 |
 
 `sourceManifest.files.sampling` 和 `sourceManifest.files.sampling-mapping` 各自包含 `size`（integer）与 `sha256`（小写 64 位十六进制字符串）。所有纳秒和毫秒整数必须按 Java/Kotlin `Long` 或等价整数解析，禁止先转换成 `Double`；服务端落库时也不要经过 JavaScript number。
+
+`sourceManifest.processId` 是字符串 UUID，不是 Linux PID；报告中的 `threads[0].tid` 仍是数值型线程 ID，且当前线上输入只会有一个 `tid`。协议不提供 `mainThreadId`，服务端应以唯一线程和 `threadName: "main"` 识别主线程。
 
 服务端派生字段建议按以下来源计算：
 

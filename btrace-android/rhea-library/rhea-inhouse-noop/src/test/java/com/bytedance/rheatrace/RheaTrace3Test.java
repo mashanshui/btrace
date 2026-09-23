@@ -18,6 +18,7 @@ public class RheaTrace3Test {
         Assert.assertEquals(10_000_000L, config.getMinSampleIntervalNs());
         Assert.assertFalse(config.isEnableJniHook());
         Assert.assertFalse(config.isEnableStackCaptureStats());
+        Assert.assertNotNull(config.getProcessId());
         Assert.assertTrue(RheaTrace3.OnlineTraceConfig.builder()
                 .setEnableStackCaptureStats(true)
                 .build()
@@ -27,11 +28,14 @@ public class RheaTrace3Test {
                 .setBuildId("release-1")
                 .setEnvironment("production")
                 .setChannel("official")
+                .setProcessId("11111111-1111-4111-8111-111111111111")
                 .build();
         Assert.assertEquals("device-anonymous", jankConfig.getAnonymousDeviceId());
         Assert.assertEquals("release-1", jankConfig.getBuildId());
         Assert.assertEquals("production", jankConfig.getEnvironment());
         Assert.assertEquals("official", jankConfig.getChannel());
+        Assert.assertEquals(
+                "11111111-1111-4111-8111-111111111111", jankConfig.getProcessId());
         Assert.assertEquals(RheaTrace3.ExportRequestResult.INVALID_RANGE,
                 RheaTrace3.exportStackData(10, 10, null));
         Assert.assertEquals(RheaTrace3.ExportRequestResult.DISABLED,
@@ -40,6 +44,15 @@ public class RheaTrace3Test {
                 RheaTrace3.exportAllStackData(null));
         Assert.assertTrue(RheaTrace3.getAvailableStackTimeRange().isEmpty());
         Assert.assertTrue(RheaTrace3.getPendingJankFiles().isEmpty());
+    }
+
+    @Test
+    public void noopTimingApiIsSafe() {
+        RheaTrace3.beginStackTiming();
+        RheaTrace3.beginStackTiming();
+        Assert.assertEquals("", RheaTrace3.endStackTiming());
+        Assert.assertEquals("", RheaTrace3.endStackTiming());
+        Assert.assertEquals("", RheaTrace3.endStackTiming());
     }
 
     @Test
@@ -77,6 +90,11 @@ public class RheaTrace3Test {
     @Test(expected = IllegalArgumentException.class)
     public void rejectsTooSmallBuffer() {
         RheaTrace3.OnlineTraceConfig.builder().setBufferSizeBytes(1024).build();
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void rejectsInvalidProcessId() {
+        RheaTrace3.OnlineTraceConfig.builder().setProcessId("process-1").build();
     }
 
     private static RheaTrace3.JankEvent.Builder validJankEvent() {

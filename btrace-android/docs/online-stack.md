@@ -72,6 +72,8 @@ rhea-stack-<pid>-<snapshotTimeNs>.rheatrace.zip
 
 ZIP 固定包含 manifest.json、sampling.bin 和 sampling-mapping.bin。manifest 记录请求、可用和实际时间范围、快照时间、记录数、覆盖数、限流丢弃数、采集配置和 SHA-256。默认单文件上限 10 MiB、目录配额 20 MiB，写入时先生成临时文件，校验后再原子重命名。
 
+线上 ZIP 的 manifest 和 `sampling.bin` extra 共享同一个进程级 UUID v4 `processId`，并都包含 `threadScope: "main"`。UUID 在当前 Android 进程生命周期内保持不变；SamplingRecord 只允许出现一个 tid，该 tid 是线上报告唯一的主线程。`rhea-stack-<pid>-...` 中的 `<pid>` 仅用于本地文件名，不是协议身份，也不新增 `mainThreadId`。调试/离线采样的 extra 仍可使用数值 PID。
+
 ### 卡顿 manifest v3
 
 通用 `exportStackData` 和 `exportAllStackData` 继续生成 `schemaVersion=1`、`artifactType=RHEA_STACK` 的 `.rheatrace.zip`。卡顿监控使用独立接口：
@@ -95,7 +97,7 @@ RheaTrace3.exportJankTrace(event, result -> {
 });
 ~~~
 
-该接口生成 `<eventId>.rheajank.zip`，manifest 固定为 `schemaVersion=3` 和 `artifactType=RHEA_JANK`，包名字段固定为 `packageName`，不再写入旧的 `appId`；它只包含事件身份、应用和查询维度、精确消息边界、采样输入、PID 以及两个二进制文件的大小和 SHA-256。它不写 v1 的请求/可用/实际范围、recordCount、Hook 开关、`mappingId` 等诊断字段；后续 mapping 默认以 `buildId` 选择。
+该接口生成 `<eventId>.rheajank.zip`，manifest 固定为 `schemaVersion=3` 和 `artifactType=RHEA_JANK`，包名字段固定为 `packageName`，不再写入旧的 `appId`；它只包含事件身份、应用和查询维度、精确消息边界、UUID v4 `processId`、`threadScope: "main"` 以及两个二进制文件的大小和 SHA-256。它不写 v1 的请求/可用/实际范围、recordCount、Hook 开关、`mappingId` 等诊断字段；后续 mapping 默认以 `buildId` 选择。
 
 同一 `eventId` 已存在且元数据与文件校验一致时直接复用原 ZIP；元数据冲突或文件损坏时导出失败。`getPendingStackFiles()` 只枚举 v1 文件，`getPendingJankFiles()` 只枚举 v3 文件，防止现有上传链路误传新协议。旧 v2 卡顿文件不会被 Processor 接受；上传方应按服务端当前 v3 接口处理本地文件。
 
@@ -123,7 +125,7 @@ Java 服务端需要直接处理上传流时，可复用单例 `StackAnalyzer` �
 
 ### app 模块端到端测试
 
-`app` 提供设备测试和主机解析编排任务。普通 app 构建仍进入原有调试模式；只有显式传入 `online_trace_test=true` 时，测试构建才让示例 `Application` 初始化线上模式。测试会启动 `MainActivity`，在主线程产生采样，导出 `RANGE`、`ALL` 两个 v1 ZIP 和一个 v3 卡顿 ZIP，并在设备端校验 manifest、条目、文件大小、SHA-256 及同事件复用。随后 Gradle 任务使用 adb 拉取产物并调用 Processor 生成四类报告：
+`app` 提供设备测试和主机解析编排任务。普通 app 构建仍进入原有调试模式；只有显式传入 `online_trace_test=true` 时，测试构建才让示例 `Application` 初始化线上模式。测试会启动 `MainActivity`，从主线程产生采样并从后台线程发起被过滤的抓栈请求，导出 `RANGE`、`ALL` 两个 v1 ZIP 和一个 v3 卡顿 ZIP，并在设备端校验 manifest、条目、文件大小、SHA-256、UUID/主线程范围及同事件复用。随后 Gradle 任务使用 adb 拉取产物并调用 Processor 生成四类报告：
 
 ~~~powershell
 .\gradlew.bat --no-daemon `

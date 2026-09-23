@@ -69,6 +69,7 @@ public final class StackArtifact implements Closeable {
         JANK_V3_FIELDS.add("minSampleIntervalNs");
         JANK_V3_FIELDS.add("attemptedSampleCount");
         JANK_V3_FIELDS.add("processId");
+        JANK_V3_FIELDS.add("threadScope");
         JANK_V3_FIELDS.add("files");
     }
 
@@ -179,6 +180,8 @@ public final class StackArtifact implements Closeable {
         if (!"little-endian".equals(manifest.optString("byteOrder", ""))) {
             throw new IOException("不支持的字节序");
         }
+        requireUuidV4(manifest, "processId");
+        requireMainThreadScope(manifest);
         if (manifest.optInt("recordCount", 0) <= 0) {
             throw new IOException("manifest recordCount 无效");
         }
@@ -245,7 +248,8 @@ public final class StackArtifact implements Closeable {
         }
         requirePositiveLong(manifest, "minSampleIntervalNs");
         requireNonNegativeLong(manifest, "attemptedSampleCount");
-        requirePositiveLong(manifest, "processId");
+        requireUuidV4(manifest, "processId");
+        requireMainThreadScope(manifest);
         if (!(manifest.opt("files") instanceof JSONObject)) {
             throw new IOException("manifest 缺少 files 校验信息");
         }
@@ -260,6 +264,22 @@ public final class StackArtifact implements Closeable {
         String text = (String) value;
         if (text.trim().isEmpty() || text.length() > maxLength) {
             throw new IOException("manifest 字段内容无效: " + key);
+        }
+    }
+
+    /** 校验 manifest 中的进程身份为 canonical UUID v4。 */
+    private static void requireUuidV4(JSONObject manifest, String key)
+            throws IOException {
+        if (!ProcessIdentity.isUuidV4(manifest.opt(key))) {
+            throw new IOException("manifest 字段必须为 UUID v4: " + key);
+        }
+    }
+
+    /** 校验线上产物只声明主线程采样范围。 */
+    private static void requireMainThreadScope(JSONObject manifest)
+            throws IOException {
+        if (!"main".equals(manifest.optString("threadScope", ""))) {
+            throw new IOException("manifest threadScope 必须为 main");
         }
     }
 

@@ -118,7 +118,7 @@ public final class StackHtmlRenderer {
                 .append("const textOf=n=>String(n?.method??n?.displayName??'');const canvasWidth=()=>Math.max(BASE_WIDTH,C.clientWidth-28)*zoom;")
                 .append("for(const t of R.threads){const o=document.createElement('option');o.value=t.tid;o.textContent=t.threadName+' ('+t.tid+')';T.appendChild(o)}")
                 .append("const d=R.renderDefaults||{};let selected=R.threads.find(t=>String(t.tid)===String(d.thread)||t.threadName===d.thread);")
-                .append("if(!selected)selected=R.threads.find(t=>t.tid===R.processId)||R.threads[0];if(selected)T.value=selected.tid;")
+                .append("if(!selected)selected=R.threads.find(t=>t.threadName==='main')||R.threads[0];if(selected)T.value=selected.tid;")
                 .append("S.value=d.sort||'chronological';V.value=d.view||'flame';M.value=d.flameMetric||'estimated';")
                 .append("function frame(f,i,dur,type,count){return '<div class=\"frame\" title=\"'+esc(type||'')+'\"><div class=\"cell method'+app(f.method)+'\" style=\"padding-left:'+(24+i*20)+'px\">'+esc(f.displayName)+'<span class=\"badge\">样本 '+count+'</span></div><div class=\"cell time\" title=\"'+(dur==null?'点采样，无精确耗时':dur+' ns')+'\">'+ms(dur)+'</div></div>'}")
                 .append("function segments(t){let a=[...t.segments];if(S.value==='duration')a.sort((x,y)=>(y.exactDurationNs??-1)-(x.exactDurationNs??-1));")

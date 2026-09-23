@@ -151,7 +151,7 @@ public final class StackAnalyzer implements StackParser {
         final JSONObject manifest;
         final long windowStart;
         final long windowEnd;
-        final int processId;
+        final String processId;
         final int pointCount;
         final int exactCount;
         final List<Interval> allExact;
@@ -161,7 +161,7 @@ public final class StackAnalyzer implements StackParser {
         final JSONObject estimationPolicy;
 
         AnalysisData(JSONObject manifest, long windowStart, long windowEnd,
-                     int processId,
+                     String processId,
                      int pointCount, int exactCount, List<Interval> allExact,
                      List<Interval> allEstimated, List<ThreadData> threads,
                      JSONArray warnings, JSONObject estimationPolicy) {
@@ -347,10 +347,26 @@ public final class StackAnalyzer implements StackParser {
             if (!jankArtifact && decoded.getRawRecordCount() != manifest.getInt("recordCount")) {
                 throw new IOException("manifest 与 sampling 记录数不一致");
             }
+            validateSamplingIdentity(manifest, decoded);
             return new ParsedAnalysis(buildAnalysisData(manifest, decoded),
                     decoded.getTrace());
         } catch (JSONException e) {
             throw new IOException("生成堆栈报告失败", e);
+        }
+    }
+
+    /** 校验 manifest 与 sampling extra 的 UUID 及主线程范围一致。 */
+    private static void validateSamplingIdentity(
+            JSONObject manifest, SamplingTraceDecoder.DecodedSampling decoded)
+            throws JSONException, IOException {
+        String manifestProcessId = manifest.getString("processId");
+        if (!manifestProcessId.equals(decoded.getProcessId())) {
+            throw new IOException("manifest 与 sampling extra 的 processId 不一致");
+        }
+        if (!"main".equals(manifest.optString("threadScope", ""))
+                || decoded.getMainTid() == null
+                || decoded.getThreadIds().size() != 1) {
+            throw new IOException("线上 sampling 必须只包含主线程");
         }
     }
 
@@ -380,8 +396,8 @@ public final class StackAnalyzer implements StackParser {
                 ? configuredInterval : DEFAULT_SAMPLE_INTERVAL_NS;
         long maxPointDuration = nominalInterval > Long.MAX_VALUE / ESTIMATE_CAP_MULTIPLIER
                 ? Long.MAX_VALUE : nominalInterval * ESTIMATE_CAP_MULTIPLIER;
-        int processId = decoded.getExtra().optInt(
-                "processId", manifest.optInt("processId", 0));
+        String processId = manifest.getString("processId");
+        int mainTid = decoded.getMainTid();
 
         Set<String> exactStarts = new LinkedHashSet<>();
         for (StackList item : decoded.getItems()) {
@@ -422,23 +438,16 @@ public final class StackAnalyzer implements StackParser {
             }
             ThreadData thread = byThread.get(item.getTid());
             if (thread == null) {
-                String name = item.getTid() == processId
-                        ? "main" : decoded.getThreadNames().get(item.getTid());
-                if (name == null || name.trim().isEmpty()) {
-                    name = item.getTid() == processId ? "main" : "Thread-" + item.getTid();
-                }
-                thread = new ThreadData(item.getTid(), name.trim());
+                String name = item.getTid() == mainTid
+                        ? "main" : "Thread-" + item.getTid();
+                thread = new ThreadData(item.getTid(), name);
                 byThread.put(item.getTid(), thread);
             }
             thread.add(segment);
         }
 
         List<ThreadData> threads = new ArrayList<>(byThread.values());
-        threads.sort((left, right) -> {
-            if (left.tid == processId) return -1;
-            if (right.tid == processId) return 1;
-            return Integer.compare(left.tid, right.tid);
-        });
+        threads.sort(Comparator.comparingInt(thread -> thread.tid));
 
         List<Interval> allEstimated = new ArrayList<>();
         for (ThreadData thread : threads) {
@@ -493,7 +502,7 @@ public final class StackAnalyzer implements StackParser {
             report.put("sourceManifest", new JSONObject(data.manifest.toString()));
         }
         report.put("renderDefaults", new JSONObject()
-                .put("thread", request.getThread())
+                .put("thread", "main")
                 .put("sort", request.getSort())
                 .put("flameMetric", "estimated")
                 .put("view", "flame"));

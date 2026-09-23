@@ -12,6 +12,7 @@
 | --- | --- | --- |
 | `TraceGlobal.nativeInit` | `TraceGlobalJni.cpp` | 初始化全局上下文、主线程和 JNI Hook |
 | `TraceGlobal.nativeCapture` | `TraceGlobalJni.cpp` | 请求一次当前线程同步抓栈 |
+| `TraceGlobal.nativeBeginStackTiming/nativeEndStackTiming` | `TraceGlobalJni.cpp` | 显式开启/结束抓栈性能统计；结束调用返回汇总日志字符串 |
 | `TraceAbility.nativeCreate` | `TraceAbilityJni.cpp` | 按 TraceMeta offset 创建 Collector |
 | `nativeStart/nativeStop` | `TraceAbilityJni.cpp` | 启停 Collector 和 Hook 生命周期 |
 | `nativeMark` | `TraceAbilityJni.cpp` | 返回当前 RingBuffer ticket |
@@ -47,6 +48,9 @@ RingBuffer 使用递增 ticket 标识记录位置。容量用尽后槽位被覆�
 - `force` 绕过 `lastJavaNano` 间隔判断；正常采样按主线程或其他线程间隔限流。
 - `captureAtEnd` 事件同时记录开始/结束时间和 CPU time；瞬时事件只记录当前时间。
 - `messageIndex` 与 `lastJavaNano` 是 thread-local，消息边界和采样限流互不跨线程。
+- `beginStackTiming` 在统计锁内清空旧数据、递增 epoch 并激活全进程会话；`request` 只在会话激活时读取额外时钟并累计成功抓栈或限频浪费耗时。
+- `endStackTiming` 通过 thread-local epoch 验证同线程配对，在锁内关闭会话并快照，在锁外排序和格式化，返回完整抓栈分布与限频统计。它不写入采样缓冲区，也不自动写 Logcat。
+- 统计会话是全进程且不可重叠的；新 begin 会替换旧会话。Collector 启停或线上开关切换时递增 epoch 并清空会话，跨生命周期的 end 返回空字符串。
 
 ### Hook 组件
 
@@ -82,6 +86,7 @@ Hook 的可用性依赖 Android/ART 版本、目标符号和 ShadowHook。初始
 
 - [Native CMake](../rhea-library/rhea-inhouse/src/main/cpp/CMakeLists.txt)
 - [SamplingCollector](../rhea-library/rhea-inhouse/src/main/cpp/sampling/SamplingCollector.cpp)
+- [RequestDiagnostics](../rhea-library/rhea-inhouse/src/main/cpp/sampling/RequestDiagnostics.h)
 - [SamplingRecord](../rhea-library/rhea-inhouse/src/main/cpp/sampling/SamplingRecord.h)
 - [PerfBuffer](../rhea-library/rhea-inhouse/src/main/cpp/base/PerfBuffer.h)
 
@@ -98,3 +103,29 @@ Hook 的可用性依赖 Android/ART 版本、目标符号和 ShadowHook。初始
 - [协议与数据格式](protocol-and-data-formats.md)
 - [源码参考](source-reference.md)
 - [开发与发布](development-and-release.md)
+
+### 请求分布诊断
+
+`endStackTiming()` 在原有耗时汇总后追加 `request diagnostics`、按线程汇总和 10 ms 桶。
+无需新增开关，仍需启用 `enableStackCaptureStats`，且每次 begin/end 必须配对。
+返回值可能超过 Logcat 单条长度，请逐行打印或保存到文件；SDK 不自动打印。
+
+- `request_count` 统计通过暂停、在线开关及线程过滤、进入限流判断的请求；`admitted_count` 表示放行。
+- `walk_failed_count` 表示 `visitOnce` 失败或栈深度校验未通过；`success_count` 沿用写入路径完成口径，不保证导出 ZIP 保留全部样本，也不等于完整栈校验通过。
+- `pending_count` 表示快照时尚未完成的请求。跨会话的迟到结果不污染新会话。
+- `types` 使用 SamplingRecord.h 的 SamplingType 数字值，其中 9 为对象分配、10 为 JNI。
+- `session_start_ns/session_end_ns` 和桶使用 BOOTTIME；`clock_id/interval_ns` 是实际限流时钟和该线程首次请求时的间隔。
+- `first_request_ms/last_request_ms` 相对于会话开始；`max_request_gap_ms` 不包含首尾空白，尾部单列 `tail_gap_ms`。
+- `initial_gate_age_ms` 为首个请求时距离此前放行的时间，使用限流时钟；没有前次放行时为 N/A，并非精确的会话起点年龄。
+- 空桶也输出。最多记录 64 个线程及每线程前 10 秒的桶，`omitted_count` 非零表示诊断不完整；超时后的已跟踪线程仍累计汇总。
+
+连续空桶说明缺乏 Hook 请求；持续有请求且失败多说明抓栈失败；持续有请求但放行少应检查实际间隔、时钟与 force 行为。
+10 ms 是事件触发采样的最小间隔，桶边界不是限流边界。诊断会增加锁、计时与内存开销，不宜作为无扰动性能基准。
+`RequestDiagnostics.h` 在统计锁内记录请求入口和完成状态，以 BOOTTIME 按线程分 10 ms 桶。
+入口记数、出口补记结果；结束快照中的未完成请求显示为 pending，迟到结果通过 epoch 校验丢弃。
+原有成功耗时、限流汇总保留；分桶上限不影响原汇总。已移除逐次抓栈调试日志。
+字段、上限和判断方法见 [SDK 请求分布诊断](app-sdk.md#请求分布诊断)。
+
+2026-09-08：诊断主体实现的 Debug/Release 双 ABI（arm64-v8a、armeabi-v7a）构建和 JVM 测试通过；随后补充分桶上限不影响原总计并恢复原有栈完整性拒绝判断，完整 Gradle 构建需在正常构建环境重跑。
+新增 RequestDiagnosticsTest 在 Pixel 4 XL、API 33、arm64-v8a 上通过，覆盖空桶、失败、线程隔离、pending 和上限。
+该测试直接调用分桶逻辑，未验证 ART Hook 到 Java 统计输出的完整链路，未重采原卡顿事件。

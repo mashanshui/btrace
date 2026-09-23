@@ -52,6 +52,23 @@ public class TraceGlobal {
         }
     }
 
+    /** 清空已有数据并开启一次全进程抓栈性能统计。 */
+    public static void beginStackTiming() {
+        if (success) {
+            nativeBeginStackTiming();
+        }
+    }
+
+    /**
+     * 结束抓栈性能统计并返回汇总日志；会话无效时返回空字符串。
+     */
+    public static String endStackTiming() {
+        if (success) {
+            return nativeEndStackTiming();
+        }
+        return "";
+    }
+
     /** 切换在线采集开关；仅影响在线模式，调试模式保持原有行为。 */
     public static void setOnlineEnabled(boolean enabled) {
         if (success) {
@@ -60,6 +77,10 @@ public class TraceGlobal {
     }
 
     private static native void nativeCapture(boolean force);
+
+    private static native void nativeBeginStackTiming();
+
+    private static native String nativeEndStackTiming();
 
     private static native void nativeSetOnlineEnabled(boolean enabled);
 }

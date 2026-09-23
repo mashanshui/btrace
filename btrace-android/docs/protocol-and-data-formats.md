@@ -10,6 +10,8 @@
 
 单次卡顿使用独立的 `<eventId>.rheajank.zip` 和 manifest v3。v3 的 `artifactType` 固定为 `RHEA_JANK`，包名字段固定为 `packageName`（不再写入旧的 `appId`），选择类型、Sampling 版本、字节序和时钟由协议版本固定，不在 manifest 中重复声明；分析窗口取 `messageStartNs` 到 `messageEndNs`，ProGuard/R8 mapping 业务标识默认取 `buildId`。Processor 仅接受 v1 通用产物和 v3 卡顿产物，旧 v2 卡顿产物不再兼容。
 
+线上 v1/v3 产物的 `processId` 都是同一 Android 进程生命周期内稳定的 canonical UUID v4 字符串，manifest 与 `sampling.bin` 的 extra 必须保持一致，并且都声明 `threadScope: "main"`。线上 SamplingRecord 必须只来自一个主线程 tid；不再写入或依赖 `mainThreadId`。调试/离线采样路径仍可在 extra 中使用数值 PID，但数值 PID 不属于线上协议身份。
+
 ### HTTP 控制协议
 
 端上使用 NanoHTTPD 在随机端口启动 HTTP/1.x 服务。CLI 通过 ADB forward 后以 GET 请求访问根路径。该协议仅用于本机调试链路，没有鉴权、TLS 或稳定公共 API 承诺。
@@ -48,11 +50,31 @@ CLI 使用固定的 `/storage/emulated/0/Android/data/<package>/files/rhea-port`
 | 4 | `uint64` | dump 时刻 |
 | 5 | `uint32` | 记录数量 |
 | 6 | `int32` | extra JSON 字节数 |
-| 7 | `byte[]` | extra JSON，当前至少包含 `processId` |
+| 7 | `byte[]` | extra JSON；线上至少包含 UUID v4 `processId` 和 `threadScope: "main"` |
+
+线上导出的 extra JSON 在保留原有导出字段的基础上，身份字段统一为：
+
+~~~json
+{
+  "processId": "<UUID v4>",
+  "threadScope": "main",
+  "selectionType": "RANGE 或 ALL",
+  "requestedStartNs": 0,
+  "requestedEndNs": 0,
+  "filterStartNs": 0,
+  "filterEndNs": 0,
+  "snapshotTimeNs": 0,
+  "mappingId": "<mapping id>",
+  "appName": "<application name>",
+  "onlineMode": true
+}
+~~~
+
+其中 `requestedStartNs`/`requestedEndNs` 在 `ALL` 导出中可以为 `null`，其余纳秒字段使用 elapsed realtime 纳秒。v1/v3 manifest 使用相同 UUID 和 `threadScope`；Processor 保持 schemaVersion `1`/`3` 不变，但会拒绝线上旧的数值型 `processId` 产物。
 
 后续为变长 `SamplingRecord`。每条记录依次编码事件类型、16 位 tid、消息 ID、六个 64 位时间/分配字段、三个 32 位 rusage 字段和栈信息。具体栈编码和不同 version 的分支由 `StackList.decode` 定义。
 
-解码器当前读取但不验证 magic 和 type。格式维护者仍必须保留正确值，并在新增版本时实现显式校验/兼容，不能依赖“旧解码器碰巧能读”。
+解码器会显式校验 magic 和 type。格式维护者仍必须保留正确值，并在新增版本时实现显式校验/兼容，不能依赖“旧解码器碰巧能读”。
 
 ### sampling-mapping 文件
 

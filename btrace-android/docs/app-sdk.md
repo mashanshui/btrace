@@ -12,6 +12,7 @@
 | --- | --- | --- |
 | `init(Context)` | 主进程中初始化 TraceManager，可能启动启动阶段采集，并启动 HTTP 服务 | 应尽可能早地在 `attachBaseContext` 调用；非主进程直接返回 |
 | `captureStackTrace(boolean force)` | 转发到 Native `TraceGlobal.capture`，在 Collector 工作时主动抓取当前线程栈 | `force=true` 只绕过时间间隔限制，不保证采集一定成功 |
+| `beginStackTiming()` / `endStackTiming()` | 显式开启/结束全进程抓栈性能统计；`endStackTiming()` 返回汇总日志 | 必须在同一线程配对；复用 `enableStackCaptureStats` 开关 |
 | `initOnline(Application, OnlineTraceConfig)` | 启动低损耗线上常驻采集 | API 26+、64 位 arm64、主进程；与调试模式互斥 |
 | `exportStackData(startNs, endNs, callback)` | 按 elapsed realtime 半开区间异步导出 | 不判断卡顿，不清空缓冲区；同一时刻只执行一个任务 |
 | `exportAllStackData(callback)` | 异步导出快照时全部有效记录 | RingBuffer 已覆盖的数据无法恢复 |
@@ -19,9 +20,23 @@
 
 noop 制品保留相同类和方法签名，方法体为空。业务代码只依赖 `RheaTrace3`，不应直接使用 `TraceManager`、`TraceProperties` 或 `trace.*` 包。
 
+### 显式抓栈性能统计
+
+开启 `enableStackCaptureStats` 后，调用 `beginStackTiming()` 会清空旧数据并开启一次全进程统计会话。会话期间，`SamplingCollector::request()` 统计完整成功抓栈请求的耗时，以及因未达最小采样间隔而拒绝的调用次数和浪费时间。调用 `endStackTiming()` 会停止会话、快照数据，并返回如下字符串：
+
+```text
+stack capture stats: success_count=12, min_ms=0.081, median_ms=0.126, avg_ms=0.143, max_ms=0.310, capture_total_ms=1.716, rate_limited_count=35, rate_limited_wasted_ms=0.052
+```
+
+没有成功抓栈样本时，`min_ms`、`median_ms`、`avg_ms` 和 `max_ms` 返回 `N/A`，`capture_total_ms` 返回 `0.000`。统计不再使用 5 秒窗口，不会自动打印 Logcat，只由调用方处理 `endStackTiming()` 的返回值。
+
+begin/end 必须在同一线程配对。统计是全进程的，因此不支持重叠会话；新的 begin 会替换尚未结束的旧会话，旧会话后续 end 返回空字符串。未匹配、跨线程、统计开关关闭、采集暂停/停止，或会话跨越采集启停/线上开关切换时，`endStackTiming()` 返回空字符串。未显式 begin 时，抓栈热路径只做开关和会话激活状态判断，不读取统计时钟、不保存样本。
+
 ### 卡顿元数据
 
-卡顿导出不会改变通用堆栈导出协议。初始化时通过 `OnlineTraceConfig` 设置匿名设备 ID、构建 ID、环境和渠道；每次卡顿使用不可变 `JankEvent` 冻结 `eventId`、发生时间、会话、场景、消息边界、阈值和 `attemptedSampleCount`。SDK 从 Android 应用与系统信息中补充包名、版本、系统版本、设备型号、PID 和实际最小采样间隔。
+卡顿导出不会改变通用堆栈导出协议。初始化时通过 `OnlineTraceConfig` 设置匿名设备 ID、构建 ID、环境和渠道；每次卡顿使用不可变 `JankEvent` 冻结 `eventId`、发生时间、会话、场景、消息边界、阈值和 `attemptedSampleCount`。SDK 从 Android 应用与系统信息中补充包名、版本、系统版本、设备型号、进程级 UUID 和实际最小采样间隔。
+
+线上 v1/v3 manifest 与 `sampling.bin` extra 使用同一个进程级 canonical UUID v4 `processId`，并写入 `threadScope: "main"`。UUID 在 Android 进程生命周期内稳定；线上二进制记录只允许出现一个 tid，报告固定输出该线程的 `threadName: "main"`，不增加 `mainThreadId`。调试/离线采样路径仍保留数值 PID 的 extra 语义。
 
 `eventId` 必须由调用方在确认逻辑卡顿时生成并在重试中复用。重试应读取 `getPendingJankFiles()` 返回的既有 ZIP，而不是重新构造事件；成功上传后使用 `deleteJankFile()` 删除。卡顿 ZIP 使用最新的 manifest v3 契约；上传时应遵循服务端的卡顿产物接口，SDK 本身只负责生成、校验和枚举本地文件。
 
@@ -58,7 +73,7 @@ stateDiagram-v2
 - `TraceConfigurations` 按 TraceMeta 反射创建并缓存配置。
 - `TraceAbility.start` 首次创建 Native Collector；嵌套 start 增加 `activeCount` 并更新可变配置。
 - `TraceAbility.stop` 返回结束 token；`activeCount` 降为 0 时停止 Native Collector。
-- `dumpTokenRange` 只为核心能力写入额外 JSON；当前额外信息包含 `processId`。
+- `dumpTokenRange` 只为核心能力写入额外 JSON；调试/离线路径的 `processId` 仍为数值 PID，线上路径则写入 UUID `processId`、`threadScope` 及导出范围、快照、mapping、应用名和 `onlineMode` 等字段。
 
 ### Sampling 默认配置
 
@@ -93,3 +108,38 @@ stateDiagram-v2
 - [总体架构](architecture.md)
 - [配置参考](configuration-reference.md)
 - [Native 实现](native-runtime.md)
+
+### 请求分布诊断
+
+`endStackTiming()` 在原有耗时汇总后追加 `request diagnostics`、按线程汇总和 10 ms 桶。
+无需新增开关，仍需启用 `enableStackCaptureStats`，且每次 begin/end 必须配对。
+返回值可能超过 Logcat 单条长度，请逐行打印或保存到文件；SDK 不自动打印。
+
+- `request_count` 统计通过暂停、在线开关及线程过滤、进入限流判断的请求；`admitted_count` 表示放行。
+- `walk_failed_count` 表示 `visitOnce` 失败或栈深度校验未通过；`success_count` 沿用写入路径完成口径，不保证导出 ZIP 保留全部样本，也不等于完整栈校验通过。
+- `pending_count` 表示快照时尚未完成的请求。跨会话的迟到结果不污染新会话。
+- `types` 使用 SamplingRecord.h 的 SamplingType 数字值，其中 9 为对象分配、10 为 JNI。
+- `session_start_ns/session_end_ns` 和桶使用 BOOTTIME；`clock_id/interval_ns` 是实际限流时钟和该线程首次请求时的间隔。
+- `first_request_ms/last_request_ms` 相对于会话开始；`max_request_gap_ms` 不包含首尾空白，尾部单列 `tail_gap_ms`。
+- `initial_gate_age_ms` 为首个请求时距离此前放行的时间，使用限流时钟；没有前次放行时为 N/A，并非精确的会话起点年龄。
+- 空桶也输出。最多记录 64 个线程及每线程前 10 秒的桶，`omitted_count` 非零表示诊断不完整；超时后的已跟踪线程仍累计汇总。
+
+连续空桶说明缺乏 Hook 请求；持续有请求且失败多说明抓栈失败；持续有请求但放行少应检查实际间隔、时钟与 force 行为。
+10 ms 是事件触发采样的最小间隔，桶边界不是限流边界。诊断会增加锁、计时与内存开销，不宜作为无扰动性能基准。
+验证记录见 [原生运行时](native-runtime.md#请求分布诊断)。测试源码为
+[RequestDiagnosticsTest.cpp](../rhea-library/rhea-inhouse/src/test/cpp/RequestDiagnosticsTest.cpp)，它不属于 Gradle JVM 测试任务。
+可用 NDK clang++ 编译（`--target=aarch64-linux-android23 -std=c++17 -static-libstdc++`），通过 adb push 到 `/data/local/tmp/` 后运行。
+
+调用示例（每条消息均结束会话，仅长消息打印，避免未配对 begin/end）：
+
+```java
+// 消息开始时调用。
+RheaTrace3.beginStackTiming();
+// 消息结束时先取统计，再执行日志、导出等工作。
+String report = RheaTrace3.endStackTiming();
+if (isSlowMessage) {
+    for (String line : report.split("\\n")) {
+        Log.i("StackDiagnostics", line);
+    }
+}
+```

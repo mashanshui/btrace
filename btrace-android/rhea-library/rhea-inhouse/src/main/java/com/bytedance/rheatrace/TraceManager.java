@@ -75,7 +75,6 @@ public class TraceManager {
     private static final String ONLINE_TEMP_SUFFIX = ".tmp";
     private static final long ONLINE_TEMP_TTL_MS = 24L * 60L * 60L * 1000L;
     private static final int SAMPLING_RECORD_MEMORY_ESTIMATE = 2304;
-
     private enum Mode {
         NONE,
         DEBUG,
@@ -130,7 +129,11 @@ public class TraceManager {
             return RheaTrace3.InitResult.MODE_CONFLICT;
         }
         if (mode == Mode.ONLINE || mode == Mode.ONLINE_STOPPED) {
-            return RheaTrace3.InitResult.ALREADY_STARTED;
+            if (onlineConfig != null
+                    && onlineConfig.getProcessId().equals(config.getProcessId())) {
+                return RheaTrace3.InitResult.ALREADY_STARTED;
+            }
+            return RheaTrace3.InitResult.MODE_CONFLICT;
         }
         mode = Mode.ONLINE;
         onlineConfig = config;
@@ -751,6 +754,8 @@ public class TraceManager {
             if (params == null) {
                 params = new JSONObject();
             }
+            params.put("processId", onlineConfig == null ? "" : onlineConfig.getProcessId());
+            params.put("threadScope", "main");
             params.put("selectionType", spec.all ? "ALL" : "RANGE");
             params.put("requestedStartNs", spec.requested == null
                     ? JSONObject.NULL : spec.requested.getStartElapsedRealtimeNanos());
@@ -807,7 +812,8 @@ public class TraceManager {
         manifest.put("enableWakeup", onlineConfig.isEnableWakeup());
         manifest.put("enableRusage", onlineConfig.isEnableRusage());
         manifest.put("appName", onlineAppName);
-        manifest.put("processId", Process.myPid());
+        manifest.put("processId", onlineConfig.getProcessId());
+        manifest.put("threadScope", "main");
         manifest.put("androidApi", Build.VERSION.SDK_INT);
         manifest.put("abi", Build.SUPPORTED_ABIS.length == 0 ? "" : Build.SUPPORTED_ABIS[0]);
         JSONObject files = new JSONObject();
@@ -841,7 +847,8 @@ public class TraceManager {
         manifest.put("thresholdNs", event.getThresholdNs());
         manifest.put("minSampleIntervalNs", onlineConfig.getMinSampleIntervalNs());
         manifest.put("attemptedSampleCount", event.getAttemptedSampleCount());
-        manifest.put("processId", Process.myPid());
+        manifest.put("processId", onlineConfig.getProcessId());
+        manifest.put("threadScope", "main");
         JSONObject files = new JSONObject();
         files.put("sampling", fileInfo(sampling));
         files.put("sampling-mapping", fileInfo(mapping));
@@ -1042,6 +1049,7 @@ public class TraceManager {
                 && onlineConfig.getEnvironment().equals(
                 manifest.optString("environment", ""))
                 && onlineConfig.getChannel().equals(manifest.optString("channel", ""))
+                && onlineConfig.getProcessId().equals(manifest.optString("processId", ""))
                 && onlineAppName.equals(manifest.optString("packageName", ""))
                 && onlineAppVersion.equals(manifest.optString("appVersion", ""))
                 && onlineVersionCode == manifest.optLong("versionCode", -1);

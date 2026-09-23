@@ -47,6 +47,8 @@ import java.util.zip.ZipOutputStream;
 
 public class StackAnalyzerTest {
 
+    private static final String PROCESS_ID = "123e4567-e89b-42d3-a456-426614174000";
+
     @Test
     public void pointSamplesHaveNoInventedDurationAndMergeIntoCallTree() throws Exception {
         List<Record> records = Arrays.asList(
@@ -57,8 +59,13 @@ public class StackAnalyzerTest {
                         "void app.C.work()", 3L));
         try {
             JSONObject report = new StackAnalyzer().analyze(artifact, null).getReport();
+            Assert.assertEquals(PROCESS_ID, report.getString("processId"));
+            Assert.assertEquals(1, report.getJSONArray("threads").length());
+            Assert.assertEquals("main", report.getJSONObject("renderDefaults")
+                    .getString("thread"));
             Assert.assertEquals(2, report.getInt("pointSampleCount"));
             JSONObject thread = report.getJSONArray("threads").getJSONObject(0);
+            Assert.assertEquals("main", thread.getString("threadName"));
             Assert.assertTrue(thread.getJSONArray("segments").getJSONObject(0)
                     .isNull("exactDurationNs"));
             JSONObject root = method(thread.getJSONArray("callTree"), "void app.A.run()");
@@ -113,7 +120,7 @@ public class StackAnalyzerTest {
     }
 
     @Test
-    public void estimationDoesNotUseAnotherThreadsNextSample() throws Exception {
+    public void rejectsSamplingContainingMultipleThreads() throws Exception {
         long ms = 1_000_000L;
         List<Record> records = Arrays.asList(
                 Record.point(100 * ms, 1000, "main.A"),
@@ -124,11 +131,12 @@ public class StackAnalyzerTest {
                 mapOf("main.A", 1L, "worker.B", 2L, "worker.C", 3L,
                         "main.D", 4L), 5 * ms);
         try {
-            JSONObject report = new StackAnalyzer().analyze(artifact, null).getReport();
-            JSONObject main = thread(report.getJSONArray("threads"), 1000);
-            JSONObject first = main.getJSONArray("segments").getJSONObject(0);
-            Assert.assertEquals(10 * ms, first.getLong("estimatedDurationNs"));
-            Assert.assertEquals("CAPPED", first.getString("estimateSource"));
+            try {
+                new StackAnalyzer().analyze(artifact, null);
+                Assert.fail("online artifact containing multiple threads should be rejected");
+            } catch (IOException expected) {
+                Assert.assertTrue(expected.getMessage().contains("一个线程"));
+            }
         } finally {
             Assert.assertTrue(artifact.delete());
         }
@@ -257,12 +265,12 @@ public class StackAnalyzerTest {
     }
 
     @Test
-    public void callTreeJsonMatchesFullReportAndContainsAllThreads() throws Exception {
+    public void callTreeJsonMatchesFullReportAndContainsMainThread() throws Exception {
         File artifact = createArtifact(1000, 100, 300,
                 Arrays.asList(
                         Record.point(150, 1000, "A", "main.Child"),
-                        Record.point(160, 2000, "A", "worker.Child")),
-                mapOf("A", 1L, "main.Child", 2L, "worker.Child", 3L));
+                        Record.point(160, 1000, "A", "main.Other")),
+                mapOf("A", 1L, "main.Child", 2L, "main.Other", 3L));
         try {
             StackAnalysisResult result = new StackAnalyzer().analyze(artifact, null);
             JSONObject report = result.getReport();
@@ -274,7 +282,7 @@ public class StackAnalyzerTest {
             JSONObject callTree = new JSONObject(callTreeText);
             Assert.assertEquals("RHEA_STACK_CALL_TREE", callTree.getString("artifactType"));
             Assert.assertFalse(callTree.has("renderDefaults"));
-            Assert.assertEquals(2, callTree.getJSONArray("threads").length());
+            Assert.assertEquals(1, callTree.getJSONArray("threads").length());
             for (int i = 0; i < report.getJSONArray("threads").length(); i++) {
                 JSONObject fullThread = report.getJSONArray("threads").getJSONObject(i);
                 JSONObject treeThread = thread(callTree.getJSONArray("threads"),
@@ -341,6 +349,23 @@ public class StackAnalyzerTest {
                 Assert.fail("input/output path conflict should be rejected");
             } catch (java.io.IOException expected) {
                 Assert.assertTrue(expected.getMessage().contains("不能使用同一路径"));
+            }
+        } finally {
+            Assert.assertTrue(artifact.delete());
+        }
+    }
+
+    @Test
+    public void rejectsSamplingProcessIdMismatch() throws Exception {
+        File artifact = createArtifact(PROCESS_ID,
+                "223e4567-e89b-42d3-a456-426614174000", 100, 300,
+                Arrays.asList(Record.point(150, 1000, "A")), mapOf("A", 1L), null);
+        try {
+            try {
+                new StackAnalyzer().analyze(artifact, null);
+                Assert.fail("manifest and sampling processId mismatch should be rejected");
+            } catch (IOException expected) {
+                Assert.assertTrue(expected.getMessage().contains("processId"));
             }
         } finally {
             Assert.assertTrue(artifact.delete());
@@ -438,7 +463,7 @@ public class StackAnalyzerTest {
                     report.getJSONObject("sourceManifest").getLong("messageEndNs"));
             Assert.assertEquals("release-1",
                     report.getJSONObject("sourceManifest").getString("buildId"));
-            Assert.assertEquals(22, report.getJSONObject("sourceManifest").length());
+            Assert.assertEquals(23, report.getJSONObject("sourceManifest").length());
             // sourceManifest is the complete v3 object; verify the nested file metadata too.
             JSONObject sourceManifest = report.getJSONObject("sourceManifest");
             for (String key : new String[]{
@@ -446,7 +471,7 @@ public class StackAnalyzerTest {
                     "anonymousDeviceId", "packageName", "appVersion", "versionCode", "buildId",
                     "environment", "channel", "osVersion", "deviceModel", "scene",
                     "messageStartNs", "messageEndNs", "thresholdNs", "minSampleIntervalNs",
-                    "attemptedSampleCount", "processId", "files"}) {
+                    "attemptedSampleCount", "processId", "threadScope", "files"}) {
                 Assert.assertTrue("missing sourceManifest field: " + key,
                         sourceManifest.has(key));
             }
@@ -634,6 +659,9 @@ public class StackAnalyzerTest {
             Assert.assertEquals("RANGE", report.getString("selectionType"));
             Assert.assertEquals("com.example.app", report.getString("appName"));
             Assert.assertEquals("release-1", report.getString("mappingId"));
+            Assert.assertEquals(PROCESS_ID, report.getString("processId"));
+            Assert.assertEquals("main",
+                    report.getJSONArray("threads").getJSONObject(0).getString("threadName"));
             Assert.assertEquals(100L, report.getLong("requestedStartNs"));
             Assert.assertEquals(400L, report.getLong("requestedEndNs"));
             Assert.assertEquals("A", report.getJSONArray("threads").getJSONObject(0)
@@ -702,17 +730,32 @@ public class StackAnalyzerTest {
         }
     }
 
-    private static File createArtifact(int processId, long eventStart, long eventEnd,
+    private static File createArtifact(int ignoredProcessId, long eventStart, long eventEnd,
                                        List<Record> records,
                                        Map<String, Long> mapping) throws Exception {
-        return createArtifact(processId, eventStart, eventEnd, records, mapping, null);
+        return createArtifact(PROCESS_ID, eventStart, eventEnd, records, mapping, null);
     }
 
-    private static File createArtifact(int processId, long eventStart, long eventEnd,
+    private static File createArtifact(int ignoredProcessId, long eventStart, long eventEnd,
                                        List<Record> records, Map<String, Long> mapping,
                                        Long minSampleIntervalNs) throws Exception {
+        return createArtifact(PROCESS_ID, eventStart, eventEnd, records, mapping,
+                minSampleIntervalNs);
+    }
+
+    private static File createArtifact(String processId, long eventStart, long eventEnd,
+                                       List<Record> records, Map<String, Long> mapping,
+                                       Long minSampleIntervalNs) throws Exception {
+        return createArtifact(processId, processId, eventStart, eventEnd, records, mapping,
+                minSampleIntervalNs);
+    }
+
+    private static File createArtifact(String processId, String samplingProcessId,
+                                       long eventStart, long eventEnd, List<Record> records,
+                                       Map<String, Long> mapping,
+                                       Long minSampleIntervalNs) throws Exception {
         File artifact = File.createTempFile("rhea-stack-analysis", ".zip");
-        byte[] sampling = encodeSampling(processId, records, mapping);
+        byte[] sampling = encodeSampling(samplingProcessId, records, mapping);
         byte[] mappingBytes = encodeMapping(mapping, 1000, "main");
         JSONObject manifest = new JSONObject()
                 .put("schemaVersion", 1)
@@ -731,6 +774,7 @@ public class StackAnalyzerTest {
                 .put("appName", "app")
                 .put("mappingId", "mapping-1")
                 .put("processId", processId)
+                .put("threadScope", "main")
                 .put("files", new JSONObject()
                         .put("sampling", fileInfo(sampling))
                         .put("sampling-mapping", fileInfo(mappingBytes)));
@@ -745,7 +789,13 @@ public class StackAnalyzerTest {
         return artifact;
     }
 
-    private static File createJankArtifact(int processId, long eventStart, long eventEnd,
+    private static File createJankArtifact(int ignoredProcessId, long eventStart, long eventEnd,
+                                           List<Record> records,
+                                           Map<String, Long> mapping) throws Exception {
+        return createJankArtifact(PROCESS_ID, eventStart, eventEnd, records, mapping);
+    }
+
+    private static File createJankArtifact(String processId, long eventStart, long eventEnd,
                                            List<Record> records,
                                            Map<String, Long> mapping) throws Exception {
         File artifact = File.createTempFile("rhea-jank-analysis", ".zip");
@@ -773,6 +823,7 @@ public class StackAnalyzerTest {
                 .put("minSampleIntervalNs", 5L)
                 .put("attemptedSampleCount", 3L)
                 .put("processId", processId)
+                .put("threadScope", "main")
                 .put("files", new JSONObject()
                         .put("sampling", fileInfo(sampling))
                         .put("sampling-mapping", fileInfo(mappingBytes)));
@@ -784,9 +835,15 @@ public class StackAnalyzerTest {
         return artifact;
     }
 
-    private static byte[] encodeSampling(int processId, List<Record> records,
+    private static byte[] encodeSampling(int ignoredProcessId, List<Record> records,
                                          Map<String, Long> mapping) {
-        byte[] extra = ("{\"processId\":" + processId + "}")
+        return encodeSampling(PROCESS_ID, records, mapping);
+    }
+
+    private static byte[] encodeSampling(String processId, List<Record> records,
+                                         Map<String, Long> mapping) {
+        byte[] extra = ("{\"processId\":\"" + processId
+                + "\",\"threadScope\":\"main\"}")
                 .getBytes(StandardCharsets.UTF_8);
         ByteBuffer buffer = ByteBuffer.allocate(64 * 1024).order(ByteOrder.LITTLE_ENDIAN);
         buffer.putInt(0x01020304);

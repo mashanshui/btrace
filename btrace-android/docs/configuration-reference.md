@@ -9,7 +9,7 @@
 | 配置 | 当前值/默认值 | 作用 |
 | --- | --- | --- |
 | `enable_btrace` | `true`（本仓当前值） | 示例 App 在真实库与 noop 库间切换 |
-| `POM_VERSION_NAME` | `1.0.1` | 三个发布模块的版本 |
+| `POM_VERSION_NAME` | `1.0.2` | 三个发布模块的版本 |
 | `compileSdk` / `targetSdk` | 30 / 30 | Android 编译与目标版本 |
 | `minSdk` | 21 | Gradle 可编译下限，不等于公开运行支持承诺 |
 | `ndkVersion` | 21.1.6352462 | Native 构建 NDK |

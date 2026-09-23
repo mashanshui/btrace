@@ -27,6 +27,7 @@
 #include <new>
 #include <string>
 #include <algorithm>
+#include <cstdio>
 
 #include "../utils/time.h"
 #include "../utils/misc.h"
@@ -39,7 +40,17 @@ namespace rheatrace {
 
 namespace {
 
-constexpr uint64_t kCaptureStatsWindowNs = 1ULL * 1000ULL * 1000ULL * 1000ULL;
+// 仅保存本线程开启的会话代次，避免跨线程或跨生命周期结束统计。
+thread_local std::vector<uint64_t> captureStatsSessionStack;
+
+struct DurationSummary {
+    bool hasSamples = false;
+    size_t count = 0;
+    long double minNs = 0;
+    long double medianNs = 0;
+    long double totalNs = 0;
+    long double maxNs = 0;
+};
 
 uint64_t elapsedNanos(uint64_t beginNs, uint64_t endNs) {
     return endNs >= beginNs ? endNs - beginNs : 0;
@@ -51,6 +62,66 @@ void addSaturated(uint64_t* value, uint64_t delta) {
     } else {
         *value += delta;
     }
+}
+
+DurationSummary summarizeDurations(std::vector<uint64_t>& samples) {
+    DurationSummary summary;
+    if (samples.empty()) {
+        return summary;
+    }
+    std::sort(samples.begin(), samples.end());
+    summary.hasSamples = true;
+    summary.count = samples.size();
+    summary.minNs = static_cast<long double>(samples.front());
+    summary.maxNs = static_cast<long double>(samples.back());
+    for (uint64_t sample : samples) {
+        summary.totalNs += static_cast<long double>(sample);
+    }
+    summary.medianNs = static_cast<long double>(samples[summary.count / 2]);
+    if (summary.count % 2 == 0) {
+        summary.medianNs = (static_cast<long double>(samples[summary.count / 2 - 1])
+                + static_cast<long double>(samples[summary.count / 2])) / 2.0L;
+    }
+    return summary;
+}
+
+std::string formatMilliseconds(bool hasSamples, long double nanos) {
+    if (!hasSamples) {
+        return "N/A";
+    }
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%.3f",
+                  static_cast<double>(nanos / 1000000.0L));
+    return std::string(buffer);
+}
+
+std::string formatCaptureStatsLog(std::vector<uint64_t>& samples, uint64_t rateLimitedCount,
+                                  uint64_t wastedNs) {
+    const DurationSummary captureSummary = summarizeDurations(samples);
+    const long double captureAvgNs = captureSummary.hasSamples
+            ? captureSummary.totalNs / static_cast<long double>(captureSummary.count) : 0;
+    const std::string captureMinMs = formatMilliseconds(captureSummary.hasSamples,
+                                                        captureSummary.minNs);
+    const std::string captureMedianMs = formatMilliseconds(captureSummary.hasSamples,
+                                                           captureSummary.medianNs);
+    const std::string captureAvgMs = formatMilliseconds(captureSummary.hasSamples, captureAvgNs);
+    const std::string captureMaxMs = formatMilliseconds(captureSummary.hasSamples,
+                                                        captureSummary.maxNs);
+    char logBuffer[1024];
+    std::snprintf(logBuffer, sizeof(logBuffer),
+                  "stack capture stats: success_count=%zu, min_ms=%s, median_ms=%s, "
+                  "avg_ms=%s, max_ms=%s, capture_total_ms=%.3f, rate_limited_count=%llu, "
+                  "rate_limited_wasted_ms=%.3f",
+                  captureSummary.count,
+                  captureMinMs.c_str(),
+                  captureMedianMs.c_str(),
+                  captureAvgMs.c_str(),
+                  captureMaxMs.c_str(),
+                  captureSummary.hasSamples
+                          ? static_cast<double>(captureSummary.totalNs / 1000000.0L) : 0.0,
+                  static_cast<unsigned long long>(rateLimitedCount),
+                  static_cast<double>(wastedNs) / 1000000.0);
+    return std::string(logBuffer);
 }
 
 } // namespace
@@ -108,6 +179,69 @@ bool SamplingCollector::shouldCaptureCurrentThread() {
             && (!collector->config.mainThreadOnly || is_main_thread());
 }
 
+void SamplingCollector::beginStackTiming() {
+    auto* collector = SamplingCollector::getInstance();
+    if (collector == nullptr || !collector->config.enableStackCaptureStats
+            || !shouldCaptureCurrentThread()) {
+        return;
+    }
+    uint64_t stackTimingEpoch;
+    {
+        std::lock_guard<std::mutex> lock(collector->captureStatsMutex);
+        // 进入锁后重新校验，防止与 stop 或线上开关切换并发启动无效会话。
+        if (!shouldCaptureCurrentThread()) {
+            return;
+        }
+        collector->requestDiagnostics = RequestDiagnostics{};
+        collector->requestDiagnostics.start = current_boot_time_nanos();
+        collector->requestDiagnostics.clockId = collector->config.clockId;
+        collector->captureDurationSamplesNs.clear();
+        collector->rateLimitedStatsCount = 0;
+        collector->rateLimitedWastedNs = 0;
+        stackTimingEpoch = collector->stackTimingEpoch.fetch_add(
+                1, std::memory_order_acq_rel) + 1;
+        collector->captureStatsActive.store(true, std::memory_order_release);
+    }
+    captureStatsSessionStack.push_back(stackTimingEpoch);
+}
+
+std::string SamplingCollector::endStackTiming() {
+    if (captureStatsSessionStack.empty()) {
+        return std::string();
+    }
+    const uint64_t stackTimingEpoch = captureStatsSessionStack.back();
+    captureStatsSessionStack.pop_back();
+
+    auto* collector = SamplingCollector::getInstance();
+    if (collector == nullptr || !collector->config.enableStackCaptureStats
+            || !shouldCaptureCurrentThread()) {
+        return std::string();
+    }
+    RequestDiagnostics diagnostics;
+    std::vector<uint64_t> samples;
+    uint64_t rateLimitedCount;
+    uint64_t wastedNs;
+    {
+        std::lock_guard<std::mutex> lock(collector->captureStatsMutex);
+        if (!shouldCaptureCurrentThread()
+                || !collector->captureStatsActive.load(std::memory_order_acquire)
+                || stackTimingEpoch != collector->stackTimingEpoch.load(
+                        std::memory_order_acquire)) {
+            return std::string();
+        }
+        collector->captureStatsActive.store(false, std::memory_order_release);
+        collector->requestDiagnostics.end = current_boot_time_nanos();
+        std::swap(diagnostics, collector->requestDiagnostics);
+        samples.swap(collector->captureDurationSamplesNs);
+        rateLimitedCount = collector->rateLimitedStatsCount;
+        wastedNs = collector->rateLimitedWastedNs;
+        collector->rateLimitedStatsCount = 0;
+        collector->rateLimitedWastedNs = 0;
+    }
+    // 排序和字符串格式化在锁外完成，避免阻塞其他线程的 request()。
+    return formatCaptureStatsLog(samples, rateLimitedCount, wastedNs) + diagnostics.format();
+}
+
 bool SamplingCollector::request(SamplingType type, void* self, bool force, bool captureAtEnd,
                                 uint64_t beginNano, uint64_t beginCpuNano) {
     auto* collector = SamplingCollector::getInstance();
@@ -121,21 +255,49 @@ bool SamplingCollector::request(SamplingType type, void* self, bool force, bool 
             return false;
         }
     }
-    const bool collectStats = collector->config.enableStackCaptureStats;
-    const uint64_t statsBeginNano = collectStats ? current_boot_time_nanos() : 0;
+    uint64_t statsEpoch = 0;
+    uint64_t statsBeginNano = 0;
+    bool collectStats = false;
+    if (collector->config.enableStackCaptureStats
+            && collector->captureStatsActive.load(std::memory_order_acquire)) {
+        statsEpoch = collector->stackTimingEpoch.load(std::memory_order_acquire);
+        statsBeginNano = current_boot_time_nanos();
+        // 读取时钟后再校验会话，避免将 begin/end 切换边界上的请求记入新会话。
+        collectStats = collector->captureStatsActive.load(std::memory_order_acquire)
+                && statsEpoch == collector->stackTimingEpoch.load(std::memory_order_acquire);
+    }
     auto currentNano = current_clock_id_time_nanos(collector->config.clockId);
     const uint64_t intervalNs = mainThread ? collector->config.mainThreadJavaIntervalNs
                                            : collector->config.otherThreadJavaIntervalNs;
     // 在线模式始终遵守硬间隔，避免调用方传入 force 造成线上抖动。
-    if ((collector->config.onlineMode ? false : force)
-            || currentNano - lastJavaNano > intervalNs) {
+    const bool admitted = (collector->config.onlineMode ? false : force)
+            || currentNano - lastJavaNano > intervalNs;
+    const int statsTid = collectStats ? gettid() : 0;
+    if (collectStats) {
+        std::lock_guard<std::mutex> lock(collector->captureStatsMutex);
+        collectStats = collector->captureStatsActive.load(std::memory_order_acquire)
+                && statsEpoch == collector->stackTimingEpoch.load(std::memory_order_acquire);
+        if (collectStats) {
+            // 分桶达到上限不影响原有成功耗时和限流汇总。
+            collector->requestDiagnostics.begin(statsTid, static_cast<int>(type),
+                    statsBeginNano, intervalNs, currentNano, lastJavaNano, admitted);
+        }
+    }
+    if (admitted) {
         lastJavaNano = currentNano;
         SamplingRecord r{};
-        if (StackVisitor::visitOnce(r.mStack, self, collector->config.stackWalkKind)) {
-            if (r.mStack.mSavedDepth == 0 || r.mStack.mSavedDepth != r.mStack.mActualDepth) {
-                return false;
+        // 诊断会话统一输出，避免逐次 Logcat 干扰采样时间分布。
+        const bool stackWalked = StackVisitor::visitOnce(
+                r.mStack, self, collector->config.stackWalkKind);
+        const bool stackComplete = stackWalked
+                && r.mStack.mSavedDepth != 0
+                && r.mStack.mSavedDepth == r.mStack.mActualDepth;
+        if (!stackComplete) {
+            if (collectStats) {
+                collector->recordCaptureStats(statsEpoch, RequestDiagnostics::WALK_FAILED,
+                        elapsedNanos(statsBeginNano, current_boot_time_nanos()),
+                        statsTid, statsBeginNano);
             }
-        } else {
             return false;
         }
         r.mType = type;
@@ -167,16 +329,16 @@ bool SamplingCollector::request(SamplingType type, void* self, bool force, bool 
         collector->write(r);
         if (collectStats) {
             const uint64_t statsEndNano = current_boot_time_nanos();
-            collector->recordCaptureStats(true, elapsedNanos(statsBeginNano, statsEndNano),
-                                          statsEndNano);
+            collector->recordCaptureStats(statsEpoch, RequestDiagnostics::SUCCESS,
+                    elapsedNanos(statsBeginNano, statsEndNano), statsTid, statsBeginNano);
         }
         return true;
     }
     collector->droppedByRateLimit.fetch_add(1, std::memory_order_relaxed);
     if (collectStats) {
         const uint64_t statsEndNano = current_boot_time_nanos();
-        collector->recordCaptureStats(false, elapsedNanos(statsBeginNano, statsEndNano),
-                                      statsEndNano);
+        collector->recordCaptureStats(statsEpoch, RequestDiagnostics::LIMITED,
+                elapsedNanos(statsBeginNano, statsEndNano), statsTid, statsBeginNano);
     }
     return false;
 }
@@ -201,75 +363,29 @@ bool SamplingCollector::start(JNIEnv* env, jlongArray asyncConfigs) {
 
 void SamplingCollector::resetCaptureStats() {
     std::lock_guard<std::mutex> lock(captureStatsMutex);
-    captureStatsWindowStartNs = current_boot_time_nanos();
+    captureStatsActive.store(false, std::memory_order_release);
+    stackTimingEpoch.fetch_add(1, std::memory_order_acq_rel);
+    requestDiagnostics = RequestDiagnostics{};
     captureDurationSamplesNs.clear();
     rateLimitedStatsCount = 0;
     rateLimitedWastedNs = 0;
 }
 
-void SamplingCollector::recordCaptureStats(bool complete, uint64_t elapsedNs, uint64_t nowNs) {
-    std::vector<uint64_t> samples;
-    uint64_t rateLimitedCount = 0;
-    uint64_t wastedNs = 0;
-    bool shouldReport = false;
-    {
-        std::lock_guard<std::mutex> lock(captureStatsMutex);
-        // request() 可由多个线程并发返回；较早完成的调用不能把已经开始的窗口回拨。
-        if (captureStatsWindowStartNs == 0) {
-            captureStatsWindowStartNs = nowNs;
-        }
-        if (complete) {
-            captureDurationSamplesNs.push_back(elapsedNs);
-        } else {
-            rateLimitedStatsCount++;
-            addSaturated(&rateLimitedWastedNs, elapsedNs);
-        }
-        if (nowNs >= captureStatsWindowStartNs
-                && nowNs - captureStatsWindowStartNs >= kCaptureStatsWindowNs) {
-            samples.swap(captureDurationSamplesNs);
-            rateLimitedCount = rateLimitedStatsCount;
-            wastedNs = rateLimitedWastedNs;
-            rateLimitedStatsCount = 0;
-            rateLimitedWastedNs = 0;
-            captureStatsWindowStartNs = nowNs;
-            shouldReport = true;
-        }
-    }
-    if (!shouldReport) {
+void SamplingCollector::recordCaptureStats(uint64_t statsEpoch, RequestDiagnostics::Outcome outcome,
+                                           uint64_t elapsedNs, int tid, uint64_t requestNs) {
+    std::lock_guard<std::mutex> lock(captureStatsMutex);
+    // endStackTiming() 会先关闭会话再快照；较晚完成的抓栈请求将被丢弃。
+    if (!captureStatsActive.load(std::memory_order_acquire)
+            || statsEpoch != stackTimingEpoch.load(std::memory_order_acquire)) {
         return;
     }
-
-    if (samples.empty()) {
-        ALOGI("stack capture stats (5s): success_count=0, min_ms=N/A, median_ms=N/A, "
-              "avg_ms=N/A, max_ms=N/A, capture_total_ms=0.000, rate_limited_count=%llu, "
-              "rate_limited_wasted_ms=%.3f",
-              static_cast<unsigned long long>(rateLimitedCount),
-              static_cast<double>(wastedNs) / 1000000.0);
-        return;
+    requestDiagnostics.finish(tid, requestNs, outcome);
+    if (outcome == RequestDiagnostics::SUCCESS) {
+        captureDurationSamplesNs.push_back(elapsedNs);
+    } else if (outcome == RequestDiagnostics::LIMITED) {
+        rateLimitedStatsCount++;
+        addSaturated(&rateLimitedWastedNs, elapsedNs);
     }
-
-    std::sort(samples.begin(), samples.end());
-    const size_t sampleCount = samples.size();
-    long double totalNs = 0;
-    for (uint64_t sample : samples) {
-        totalNs += static_cast<long double>(sample);
-    }
-    long double medianNs = static_cast<long double>(samples[sampleCount / 2]);
-    if (sampleCount % 2 == 0) {
-        medianNs = (static_cast<long double>(samples[sampleCount / 2 - 1])
-                + static_cast<long double>(samples[sampleCount / 2])) / 2.0L;
-    }
-    ALOGI("stack capture stats (5s): success_count=%zu, min_ms=%.3f, median_ms=%.3f, "
-          "avg_ms=%.3f, max_ms=%.3f, capture_total_ms=%.3f, rate_limited_count=%llu, "
-          "rate_limited_wasted_ms=%.3f",
-          sampleCount,
-          static_cast<double>(samples.front()) / 1000000.0,
-          static_cast<double>(medianNs) / 1000000.0,
-          static_cast<double>(totalNs / static_cast<long double>(sampleCount) / 1000000.0L),
-          static_cast<double>(samples.back()) / 1000000.0,
-          static_cast<double>(totalNs / 1000000.0L),
-          static_cast<unsigned long long>(rateLimitedCount),
-          static_cast<double>(wastedNs) / 1000000.0);
 }
 
 class SamplingDumper : public Dumper {

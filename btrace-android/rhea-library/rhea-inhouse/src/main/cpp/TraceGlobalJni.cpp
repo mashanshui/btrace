@@ -56,6 +56,21 @@ Java_com_bytedance_rheatrace_trace_base_TraceGlobal_nativeCapture(JNIEnv* env, j
 
 extern "C"
 JNIEXPORT void JNICALL
+Java_com_bytedance_rheatrace_trace_base_TraceGlobal_nativeBeginStackTiming(
+        JNIEnv* env, jclass clazz) {
+    rheatrace::SamplingCollector::beginStackTiming();
+}
+
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_bytedance_rheatrace_trace_base_TraceGlobal_nativeEndStackTiming(
+        JNIEnv* env, jclass clazz) {
+    const std::string timingLog = rheatrace::SamplingCollector::endStackTiming();
+    return env->NewStringUTF(timingLog.c_str());
+}
+
+extern "C"
+JNIEXPORT void JNICALL
 Java_com_bytedance_rheatrace_trace_base_TraceGlobal_nativeSetOnlineEnabled(JNIEnv* env,
                                                                             jclass clazz,
                                                                             jboolean enabled) {

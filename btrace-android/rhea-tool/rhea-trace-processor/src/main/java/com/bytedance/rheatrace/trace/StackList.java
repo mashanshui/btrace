@@ -191,7 +191,10 @@ public class StackList {
         return this;
     }
 
-    public static boolean decode(int version, Map<Long, MethodSymbol> mapping, ByteBuffer buffer, List<StackList> result, long traceBeginTime, int pid) {
+    /** 解码 SamplingRecord；mainTid 仅用于主线程阻塞与唤醒关系的关联。 */
+    public static boolean decode(int version, Map<Long, MethodSymbol> mapping,
+                                 ByteBuffer buffer, List<StackList> result,
+                                 long traceBeginTime, int mainTid) {
         Map<Long, Integer> wakers = new HashMap<>();
         while (buffer.hasRemaining()) {
             int type = buffer.getShort() & 0xffff;
@@ -279,7 +282,7 @@ public class StackList {
             }
         }
         for (StackList item : result) {
-            if (item.tid == pid && (item.type == kMonitor || item.type == kPark || item.type == kWait)) {
+            if (item.tid == mainTid && (item.type == kMonitor || item.type == kPark || item.type == kWait)) {
                 int wakeupTid = wakers.getOrDefault(item.nanoTime, 0);
                 if (wakeupTid != 0) {
                     item.wakeupTid = wakeupTid;

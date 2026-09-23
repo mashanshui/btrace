@@ -44,6 +44,8 @@ class App : Application() {
                     .setBuildId("app-online-test-build")
                     .setEnvironment("test")
                     .setChannel("instrumentation")
+                    // 设备测试与 Application 的预初始化必须复用同一个 UUID v4。
+                    .setProcessId("11111111-1111-4111-8111-111111111111")
                     .build()
             )
             Log.i("RheaTrace", "online test init result: $result")

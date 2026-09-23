@@ -20,6 +20,7 @@ import com.bytedance.rheatrace.core.Arguments;
 import com.bytedance.rheatrace.core.TraceError;
 import com.bytedance.rheatrace.core.Workspace;
 import com.bytedance.rheatrace.perfetto.Trace;
+import com.bytedance.rheatrace.stack.ProcessIdentity;
 
 import org.apache.commons.io.FileUtils;
 import org.json.JSONObject;
@@ -32,8 +33,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class SamplingTraceDecoder {
 
@@ -48,16 +51,26 @@ public class SamplingTraceDecoder {
         private final List<StackList> items;
         private final JSONObject extra;
         private final Map<Integer, String> threadNames;
+        /** 线上产物声明的 UUID 进程身份；调试采样没有该值时为 null。 */
+        private final String processId;
+        /** 所有原始 SamplingRecord 中出现过的线程 ID。 */
+        private final Set<Integer> threadIds;
+        /** 线上产物唯一主线程的数值 tid；非线上采样时为 null。 */
+        private final Integer mainTid;
         private final int formatVersion;
         private final int rawRecordCount;
 
         private DecodedSampling(Trace trace, List<StackList> items, JSONObject extra,
-                                Map<Integer, String> threadNames, int formatVersion,
-                                int rawRecordCount) {
+                                Map<Integer, String> threadNames, String processId,
+                                Set<Integer> threadIds, Integer mainTid,
+                                int formatVersion, int rawRecordCount) {
             this.trace = trace;
             this.items = items;
             this.extra = extra;
             this.threadNames = Collections.unmodifiableMap(new HashMap<>(threadNames));
+            this.processId = processId;
+            this.threadIds = Collections.unmodifiableSet(new LinkedHashSet<>(threadIds));
+            this.mainTid = mainTid;
             this.formatVersion = formatVersion;
             this.rawRecordCount = rawRecordCount;
         }
@@ -78,6 +91,21 @@ public class SamplingTraceDecoder {
             return threadNames;
         }
 
+        /** 返回线上产物中的 UUID 进程身份；调试采样没有该值时返回 null。 */
+        public String getProcessId() {
+            return processId;
+        }
+
+        /** 返回所有原始 SamplingRecord 中出现过的线程 ID。 */
+        public Set<Integer> getThreadIds() {
+            return threadIds;
+        }
+
+        /** 返回线上主线程 ID；非主线程限定的调试采样返回 null。 */
+        public Integer getMainTid() {
+            return mainTid;
+        }
+
         public int getFormatVersion() {
             return formatVersion;
         }
@@ -91,18 +119,16 @@ public class SamplingTraceDecoder {
         final JSONObject extra;
         final int version;
         final int recordCount;
+        /** 所有原始 SamplingRecord 中出现过的线程 ID。 */
+        final Set<Integer> threadIds;
 
-        SamplingPayload(JSONObject extra, int version, int recordCount) {
+        SamplingPayload(JSONObject extra, int version, int recordCount,
+                        Set<Integer> threadIds) {
             this.extra = extra;
             this.version = version;
             this.recordCount = recordCount;
+            this.threadIds = threadIds;
         }
-    }
-
-    private static int pid = 0;
-
-    public static int getPid() {
-        return pid;
     }
 
     public static Trace decode() throws IOException {
@@ -142,12 +168,36 @@ public class SamplingTraceDecoder {
         SamplingPayload payload = decodeSampling(
                 sampling, mappingDecoder.symbolMapping, samplingTrace);
         JSONObject extra = payload.extra;
-        int actualPid = extra.optInt("processId", 0);
-        pid = actualPid;
+        boolean mainThreadOnly = hasMainThreadScope(extra);
+        String processId = null;
+        Integer mainTid = null;
+        int tracePid = 0;
+        int traceMainTid = tracePid;
+        if (mainThreadOnly) {
+            Object processIdValue = extra.opt("processId");
+            if (!ProcessIdentity.isUuidV4(processIdValue)) {
+                throw new IOException("sampling extra processId 必须为 UUID v4");
+            }
+            if (payload.threadIds.size() != 1) {
+                throw new IOException("线上 sampling 必须只包含一个线程");
+            }
+            processId = (String) processIdValue;
+            mainTid = payload.threadIds.iterator().next();
+            // Perfetto 仍要求数值 pid；线上协议不暴露数值进程身份，因此使用主线程 tid 作为内部值。
+            tracePid = mainTid;
+            traceMainTid = mainTid;
+        } else if (extra.has("threadScope")) {
+            throw new IOException("sampling extra threadScope 必须为 main");
+        } else {
+            // 调试/离线采样仍使用历史数值 PID，同时不把它暴露为线上身份。
+            tracePid = extra.optInt("processId", 0);
+            traceMainTid = tracePid;
+        }
         Trace trace = !buildTrace || samplingTrace.isEmpty() ? null
-                : StackTraceConvertor.convert(actualPid, appName, samplingTrace, mappingDecoder.threadNames);
+                : StackTraceConvertor.convert(tracePid, traceMainTid, appName,
+                samplingTrace, mappingDecoder.threadNames);
         return new DecodedSampling(trace, samplingTrace, extra, mappingDecoder.threadNames,
-                payload.version, payload.recordCount);
+                processId, payload.threadIds, mainTid, payload.version, payload.recordCount);
     }
 
     private static SamplingPayload decodeSampling(File sampling, Map<Long, MethodSymbol> mapping,
@@ -188,23 +238,40 @@ public class SamplingTraceDecoder {
         } else {
             extra = new JSONObject();
         }
-        validateRecords(buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN), version, count);
-        int pid = extra.optInt("processId", 0);
+        Set<Integer> threadIds = new LinkedHashSet<>();
+        validateRecords(buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN), version, count,
+                threadIds);
         long traceBeginTime = extra.optLong("startTime", 0) * 1000000;
+        boolean onlineMainScope = "main".equals(extra.optString("threadScope", ""));
+        int mainTid = onlineMainScope && threadIds.size() == 1
+                ? threadIds.iterator().next() : extra.optInt("processId", 0);
         try {
-            StackList.decode(version, mapping, buffer, items, traceBeginTime, pid);
+            StackList.decode(version, mapping, buffer, items, traceBeginTime, mainTid);
         } catch (RuntimeException error) {
             throw new IOException("sampling 记录解码失败", error);
         }
-        return new SamplingPayload(extra, version, count);
+        return new SamplingPayload(extra, version, count, threadIds);
     }
 
-    private static void validateRecords(ByteBuffer buffer, int version, int count)
+    /** 判断 extra 是否声明线上主线程采样范围。 */
+    private static boolean hasMainThreadScope(JSONObject extra) throws IOException {
+        if (!extra.has("threadScope")) {
+            return false;
+        }
+        if (!"main".equals(extra.optString("threadScope", ""))) {
+            throw new IOException("sampling extra threadScope 必须为 main");
+        }
+        return true;
+    }
+
+    private static void validateRecords(ByteBuffer buffer, int version, int count,
+                                        Set<Integer> threadIds)
             throws IOException {
         for (int index = 0; index < count; index++) {
             requireRemaining(buffer, 8 + 32, "记录固定字段", index);
             int type = buffer.getShort() & 0xffff;
-            buffer.getShort();
+            int tid = buffer.getShort();
+            threadIds.add(tid);
             buffer.getInt();
             buffer.position(buffer.position() + 32);
             if (type < 1 || type > 23) {

@@ -18,12 +18,14 @@
 #include <jni.h>
 #include "../base/PerfCollectorBaseImpl.h"
 #include "SamplingRecord.h"
+#include "RequestDiagnostics.h"
 #include "SamplingConfig.h"
 #include "StackVisitor.h"
 #include "../utils/time.h"
 #include <unistd.h>
 #include <atomic>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace rheatrace {
@@ -60,6 +62,12 @@ public:
     static bool
     request(SamplingType type, void* self = nullptr, bool force = false, bool captureAtEnd = false,
             uint64_t beginNano = 0, uint64_t beginCpuNano = 0);
+
+    // 开启一次显式的全进程抓栈性能统计会话。
+    static void beginStackTiming();
+
+    // 结束当前线程开启的统计会话并返回汇总日志；会话无效时返回空字符串。
+    static std::string endStackTiming();
 
     static bool shouldCaptureCurrentThread();
 
@@ -109,7 +117,6 @@ protected:
     }
 
 private:
-
     SamplingCollector(PerfBuffer<SamplingRecord>* buffer, SamplingConfig& config)
             : PerfCollectorBaseImpl<rheatrace::TYPE_SAMPLING, 5, false, SamplingRecord>(buffer),
               config(config), paused(true) {
@@ -117,7 +124,10 @@ private:
 
     void resetCaptureStats();
 
-    void recordCaptureStats(bool complete, uint64_t elapsedNs, uint64_t nowNs);
+    void recordCaptureStats(uint64_t statsEpoch, RequestDiagnostics::Outcome outcome,
+                            uint64_t elapsedNs, int tid, uint64_t requestNs);
+
+    RequestDiagnostics requestDiagnostics;
 
     static std::atomic<SamplingCollector*> sInstance;
     static std::atomic<bool> sOnlineEnabled;
@@ -125,7 +135,8 @@ private:
     std::atomic<bool> paused;
     std::atomic<uint64_t> droppedByRateLimit{0};
     std::mutex captureStatsMutex;
-    uint64_t captureStatsWindowStartNs = 0;
+    std::atomic<uint64_t> stackTimingEpoch{0};
+    std::atomic<bool> captureStatsActive{false};
     std::vector<uint64_t> captureDurationSamplesNs;
     uint64_t rateLimitedStatsCount = 0;
     uint64_t rateLimitedWastedNs = 0;
